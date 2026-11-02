@@ -1,0 +1,73 @@
+name: Container image
+
+# Builds the Docker image and publishes it to GitHub Container Registry:
+#   ghcr.io/<owner>/<repo>:latest      latest build of the default branch
+#   ghcr.io/<owner>/<repo>:sha-<short> every build of the default branch
+#   ghcr.io/<owner>/<repo>:1.2.3, :1.2 git tags like v1.2.3
+# Pull requests are built (to catch breakage) but not published.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  # Weekly rebuild without cache: picks up new yt-dlp releases (YouTube changes
+  # often), Chromium and Debian security updates.
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.title=MPEG-YT
+            org.opencontainers.image.description=Tablet-first YouTube browser; video streamed as MPEG-1 over WebSocket to a JSMpeg WebGL canvas
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

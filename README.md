@@ -13,11 +13,21 @@ There is no `<video>` element anywhere in the client.
 
 ## Run it
 
+GitHub Actions builds the image for **amd64 and arm64** (so it runs on a Raspberry Pi too) and publishes it to
+`ghcr.io/amurikurthy/mpeg-yt`. You only need [`docker-compose.yml`](docker-compose.yml):
+
 ```bash
-docker compose up -d --build
+mkdir mpeg-yt && cd mpeg-yt
+curl -fsSLO https://raw.githubusercontent.com/amurikurthy/mpeg-yt/main/docker-compose.yml
+docker compose up -d
 ```
 
 Open `http://<host>:8080`.
+
+Update with `docker compose pull && docker compose up -d`. The image is rebuilt on every push to `main` and
+weekly, which keeps yt-dlp current with YouTube changes. Tags: `latest`, `sha-<commit>`, and `1.2.3` / `1.2` for
+`v1.2.3` git tags. To build locally instead, uncomment `build: .` in the compose file and run
+`docker compose up -d --build`.
 
 On a tablet, use **Share → Add to Home Screen** (iPad) or **Install app** (Android/Chrome).
 It then opens full-screen without browser chrome.
