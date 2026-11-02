@@ -32,6 +32,38 @@ weekly, which keeps yt-dlp current with YouTube changes. Tags: `latest`, `sha-<c
 On a tablet, use **Share → Add to Home Screen** (iPad) or **Install app** (Android/Chrome).
 It then opens full-screen without browser chrome.
 
+## Behind a reverse proxy (Pangolin, Traefik, Caddy, nginx…)
+
+- **Target:** the proxy needs to reach the container on port **8080**. If the proxy (or Pangolin's
+  **Newt**) runs in the same compose project, use the service name, e.g. `http://mpeg-yt:8080`, and you
+  don't need a `ports:` mapping. Only publish `8080:8080` if something outside Docker must connect.
+- **WebSockets** must be allowed. Video and the sign-in screen use them under `/api/`. Pangolin,
+  Traefik and Caddy pass them through by default; nginx needs the usual `Upgrade`/`Connection` headers.
+- **Health check:** `GET /healthz` returns `{"ok":true}`.
+- The proxy's own login (e.g. Pangolin SSO) works as normal: the page and its WebSockets carry the proxy's
+  session cookie.
+
+Example with Pangolin's Newt in the same compose file:
+
+```yaml
+services:
+  mpeg-yt:
+    image: ghcr.io/amurikurthy/mpeg-yt:latest
+    volumes: [./config:/config, ./cache:/cache]
+    shm_size: "512mb"
+    restart: unless-stopped
+  newt:
+    image: fosrl/newt
+    restart: unless-stopped
+    environment:
+      PANGOLIN_ENDPOINT: https://pangolin.example.com
+      NEWT_ID: ${NEWT_ID}
+      NEWT_SECRET: ${NEWT_SECRET}      # keep in a .env file, not in the compose file
+```
+
+In Pangolin, set the resource target to **`http` → host `mpeg-yt` → port `8080`**, with health check
+path `/healthz`.
+
 ## Features
 
 - **YouTube browsing:** home shelves, search with suggestions and infinite scroll, channels, playlists, related videos, and your own feeds when signed in.
@@ -89,6 +121,7 @@ Notes:
 | `MAX_STREAMS` | `8` | Concurrent transcodes |
 | `FFMPEG_THREADS` | auto | |
 | `AUTH_TOKEN` | — | If set, open `/?token=…` once; a cookie is then set |
+| `PUID` / `PGID` | `1000` / `1000` | User/group the app runs as; `/config` and `/cache` are chowned to it at start |
 | `CONFIG_DIR` | `/config` | Where the sign-in session is saved; mount it as a volume |
 | `LOGIN_BROWSER` | on | `0` disables in-app sign-in (cookies.txt upload still works) |
 | `YTDLP_COOKIES` | — | Use a cookies.txt you manage yourself instead of in-app sign-in |

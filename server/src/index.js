@@ -66,7 +66,22 @@ function serveStatic(req, res, url) {
 
 // ---------- boot ----------
 
+function checkWritable(dir, purpose) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+  } catch (e) {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : '?';
+    console.warn(`[server] WARNING: ${dir} is not writable by uid ${uid} (${e.code || e.message}); ${purpose} will not work. ` +
+      `Fix with: chown -R ${uid} <host folder mounted at ${dir}>`);
+  }
+}
+
 async function main() {
+  checkWritable(cfg.configDir, 'saving your sign-in');
+  checkWritable(cfg.cacheDir, 'caching');
   const registry = new ProviderRegistry(cfg);
   await registry.load();
   const api = createApi(registry, cfg);

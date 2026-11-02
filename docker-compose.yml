@@ -7,13 +7,15 @@ services:
     # build: .                       # uncomment to build from this checkout instead
     container_name: mpeg-yt
     ports:
-      - "8080:8080"
+      - "8080:8080"                  # not needed if a reverse proxy in the same compose project connects to mpeg-yt:8080"
     environment:
       DEFAULT_HEIGHT: "720"          # default stream resolution
       MAX_HEIGHT: "1080"             # cap (MPEG-1 is CPU-heavy; lower this on small hosts)
       # MAX_STREAMS: "4"             # concurrent transcodes
       # AUTH_TOKEN: change-me        # recommended if reachable beyond your LAN; open /?token=change-me once
       # YOUTUBE_MARK_WATCHED: "1"    # when signed in, add what you play to your YouTube history
+      # PUID: "1000"               # owner of the files in ./config (default 1000:1000)
+      # PGID: "1000"
       # TZ: Europe/London
     volumes:
       - ./config:/config             # your YouTube sign-in is saved here
