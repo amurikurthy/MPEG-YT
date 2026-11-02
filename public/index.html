@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <script>
+    // Apply the saved theme before first paint (dark unless the viewer chose light).
+    try { if (JSON.parse(localStorage.getItem('mpegyt.prefs') || '{}').theme === 'light') {
+      document.documentElement.dataset.theme = 'light';
+      document.querySelector('meta[name=color-scheme]').content = 'light';
+    } } catch (e) {}
+  </script>
+  <meta name="theme-color" content="#0e0f13">
+  <!-- Installable to the tablet home screen: opens without browser chrome. -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="MPEG-YT">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <title>MPEG-YT</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/" aria-label="Home">
+      <img src="/icon.svg" alt="" width="26" height="26">
+      <span>MPEG-YT</span>
+    </a>
+    <nav class="providers" id="providers" aria-label="Sources"></nav>
+    <form class="search" id="search" role="search" autocomplete="off">
+      <input id="q" type="search" placeholder="Search" aria-label="Search" spellcheck="false" enterkeyhint="search">
+      <button type="submit" aria-label="Search">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M10 4a6 6 0 1 0 3.7 10.7l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Zm0 2a4 4 0 1 1 0 8 4 4 0 0 1 0-8Z"/></svg>
+      </button>
+      <ul class="suggest" id="suggest" role="listbox" hidden></ul>
+    </form>
+    <button class="theme-btn" id="account" type="button" aria-label="Account" hidden></button>
+    <button class="theme-btn" id="theme" type="button" aria-label="Switch to light mode"></button>
+  </header>
+  <main id="view" tabindex="-1"></main>
+
+  <!-- JSMpeg: MPEG-TS demuxer, MPEG-1/MP2 decoders (WASM), WebGL renderer, WebAudio out -->
+  <script src="/vendor/jsmpeg.min.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+services:
+  mpeg-yt:
+    build: .
+    image: mpeg-yt:latest
+    ports:
+      - "8080:8080"
+    environment:
+      DEFAULT_HEIGHT: "720"
+      MAX_HEIGHT: "1080"
+      # AUTH_TOKEN: change-me     # recommended if reachable beyond your LAN; open /?token=change-me once
+      # YOUTUBE_MARK_WATCHED: "1" # when signed in, add what you play to your YouTube history
+    volumes:
+      - ./config:/config           # your YouTube sign-in is saved here
+    shm_size: "512mb"              # for the temporary sign-in browser
+      - cache:/cache
+    restart: unless-stopped
+
+volumes:
+  cache:

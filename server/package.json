@@ -1,0 +1,14 @@
+{
+  "name": "mpeg-yt",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native YouTube browser UI; video is transcoded to MPEG-1/MP2 and streamed over WebSocket to a JSMpeg WebGL canvas.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
