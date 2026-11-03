@@ -5,8 +5,10 @@ const path = require('path');
 const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const cfg = require('./config');
-const { ProviderRegistry } = require('./providers');
 const { createApi } = require('./api');
+const { Account } = require('./yt/account');
+const { Streams } = require('./yt/streams');
+const { YouTube } = require('./yt/innertube');
 const { handleStream, activeStreams } = require('./stream/session');
 const { parseInput } = require('./login/browser-session');
 
@@ -18,6 +20,7 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json',
   '.wasm': 'application/wasm',
 };
 
@@ -47,6 +50,11 @@ function serveStatic(req, res, url) {
   }
   fs.stat(file, (err, st) => {
     if (err || !st.isFile()) {
+      // App routes such as /@some.channel contain dots; anything that isn't a real
+      // asset gets the app shell, which shows its own "not available" page.
+      if (!/^\/(js|css|vendor|icons)\//.test(rel) && rel !== '/index.html') {
+        return serveStatic(req, res, new URL('/', 'http://x'));
+      }
       res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
       return;
     }
@@ -82,9 +90,21 @@ function checkWritable(dir, purpose) {
 async function main() {
   checkWritable(cfg.configDir, 'saving your sign-in');
   checkWritable(cfg.cacheDir, 'caching');
-  const registry = new ProviderRegistry(cfg);
-  await registry.load();
-  const api = createApi(registry, cfg);
+  let yt = null;
+  let streams = null;
+  const account = new Account(cfg, {
+    // Sign-in changed: feeds, recommendations and stream access all depend on it.
+    onChange: () => {
+      yt?.reset();
+      streams?.reset();
+    },
+  });
+  await account.init();
+  streams = new Streams(cfg, account);
+  await streams.init().catch((e) => console.warn(`[streams] yt-dlp not available: ${e.message}`));
+  yt = new YouTube(cfg, account);
+  yt.session().catch((e) => console.warn(`[yt] could not reach YouTube yet: ${e.message}`));
+  const api = createApi({ yt, streams, account, cfg });
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -112,13 +132,13 @@ async function main() {
     };
     if (!authed(req, url)) return reject(401, 'Unauthorized');
 
-    // Sign-in browser: /api/p/<provider>/account/screen (video) and /account/input (events + status).
-    const m = /^\/api\/p\/([^/]+)\/account\/(screen|input)$/.exec(url.pathname);
+    // Sign-in browser: /api/account/screen (video) and /api/account/input (events + status).
+    const m = /^\/api\/account\/(screen|input)$/.exec(url.pathname);
     if (m) {
-      const session = registry.get(decodeURIComponent(m[1]))?.loginSession?.();
+      const session = account.loginSession();
       if (!session || session.state !== 'running') return reject(409, 'Conflict');
       return wss.handleUpgrade(req, socket, head, (ws) => {
-        if (m[2] === 'screen') return session.addViewer(ws);
+        if (m[1] === 'screen') return session.addViewer(ws);
         session.addInputSocket(ws);
         ws.on('message', (data, isBinary) => {
           if (isBinary || data.length > 4096) return;
@@ -131,7 +151,7 @@ async function main() {
     if (url.pathname !== '/api/stream') return reject(404, 'Not Found');
     wss.handleUpgrade(req, socket, head, (ws) => {
       ws._socket.setNoDelay(true);
-      handleStream(ws, url.searchParams, registry, cfg).catch((e) => {
+      handleStream(ws, url.searchParams, streams, cfg).catch((e) => {
         console.error('[stream]', e);
         ws.close(1011);
       });

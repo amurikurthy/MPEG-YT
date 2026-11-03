@@ -27,6 +27,10 @@ class TTLCache {
     this.map.set(key, { value, exp: Date.now() + ttlMs });
   }
 
+  delete(key) {
+    this.map.delete(key);
+  }
+
   /** Return cached value or compute it once (errors are not cached). */
   wrap(key, fn, ttlMs) {
     const hit = this.get(key);

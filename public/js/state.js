@@ -15,7 +15,6 @@ function write(key, value) {
 }
 
 const PREFS = 'mpegyt.prefs';
-const HISTORY = 'mpegyt.history';
 
 export const prefs = {
   get(k, d) {
@@ -29,22 +28,36 @@ export const prefs = {
   },
 };
 
-/** "Continue watching": last position per item, newest first, capped. */
+/**
+ * Resume positions (and a local watch history for when you're signed out),
+ * newest first, capped.
+ */
+const WATCHED = 'mpegyt.watched';
 export const history = {
-  list(pid) {
-    return read(HISTORY, []).filter((h) => h.pid === pid);
+  list() {
+    return read(WATCHED, []);
   },
-  get(pid, id) {
-    return read(HISTORY, []).find((h) => h.pid === pid && h.item.id === id);
+  /** -> { pos, duration } or undefined */
+  get(id) {
+    return read(WATCHED, []).find((h) => h.id === id);
   },
-  save(pid, item, pos, duration) {
+  save(item, pos, duration) {
     if (!item || !item.id) return;
-    const all = read(HISTORY, []).filter((h) => !(h.pid === pid && h.item.id === item.id));
-    const slim = {
-      kind: 'video', id: item.id, title: item.title, subtitle: item.subtitle,
-      subtitleRef: item.subtitleRef, thumbnail: item.thumbnail, duration: duration || item.duration,
-    };
-    all.unshift({ pid, item: slim, pos, at: Date.now() });
-    write(HISTORY, all.slice(0, 60));
+    const all = read(WATCHED, []).filter((h) => h.id !== item.id);
+    all.unshift({
+      id: item.id,
+      pos,
+      duration: duration || item.duration,
+      at: Date.now(),
+      item: {
+        kind: 'video', id: item.id, title: item.title, thumbnail: item.thumbnail,
+        channel: item.channel ? { id: item.channel.id, name: item.channel.name, avatar: item.channel.avatar, verified: item.channel.verified } : undefined,
+        durationText: item.durationText, viewsText: item.shortViewsText?.replace(/ views?$/, '') || item.viewsText, publishedText: item.relativeDate || item.publishedText,
+      },
+    });
+    write(WATCHED, all.slice(0, 200));
+  },
+  clear() {
+    write(WATCHED, []);
   },
 };

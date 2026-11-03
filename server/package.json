@@ -7,8 +7,11 @@
   "scripts": {
     "start": "node src/index.js"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "youtubei.js": "^18.3.0"
   }
 }

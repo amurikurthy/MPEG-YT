@@ -1,14 +1,14 @@
 /* global JSMpeg */
-import { h, icon } from './ui.js';
+import { h, icon, toast } from './ui.js';
 
 // Account UI: status sheet, cookies.txt upload, and the in-app sign-in browser
 // (a server-side Chromium streamed to a canvas through JSMpeg's live mode).
 
 const enc = encodeURIComponent;
-const base = (pid) => `/api/p/${enc(pid)}/account`;
+const base = () => '/api/account';
 
-async function call(pid, path = '', { method = 'GET', body } = {}) {
-  const r = await fetch(base(pid) + path, {
+async function call(_unused, path = '', { method = 'GET', body } = {}) {
+  const r = await fetch(base() + path, {
     method,
     body,
     credentials: 'same-origin',
@@ -24,12 +24,14 @@ function wsUrl(path) {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${path}${tok ? `?token=${enc(tok)}` : ''}`;
 }
 
+const provider = { name: 'YouTube' };
+
 /**
- * @param {object} provider  provider descriptor (id, name, account)
+ * Sign-in sheet.
  * @param {(account) => void} onChange  called after sign-in / sign-out
  */
-export function openAccount(provider, onChange) {
-  const pid = provider.id;
+export function openSignIn(onChange) {
+  const pid = null;
   const close = () => {
     overlay.remove();
     document.removeEventListener('keydown', onEsc);
@@ -53,7 +55,7 @@ export function openAccount(provider, onChange) {
         h('p', { class: 'muted' }, 'Your recommendations, subscriptions, Watch later and liked videos appear on the home page.'),
         err,
         h('div', { class: 'sheet-actions' },
-          h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
+          h('button', { class: 'pill', type: 'button', onclick: async () => {
             try {
               const a = await call(pid, '/logout', { method: 'POST' });
               onChange(a);
@@ -86,7 +88,7 @@ export function openAccount(provider, onChange) {
       err,
       h('div', { class: 'sheet-actions col' },
         acct.methods.includes('browser')
-          ? h('button', { class: 'btn big', type: 'button', onclick: () => { close(); openSignInBrowser(provider, onChange); } }, 'Sign in with Google')
+          ? h('button', { class: 'pill primary big', type: 'button', onclick: () => { close(); openSignInBrowser(onChange); } }, 'Sign in with Google')
           : null,
         acct.methods.includes('cookies')
           ? h('button', { class: 'link-btn', type: 'button', onclick: () => file.click() }, 'Or upload a cookies.txt file')
@@ -100,17 +102,17 @@ export function openAccount(provider, onChange) {
 }
 
 /** Full-screen remote sign-in browser. */
-export async function openSignInBrowser(provider, onChange) {
-  const pid = provider.id;
+export async function openSignInBrowser(onChange) {
+  const pid = null;
   const canvas = h('canvas', { class: 'remote-canvas', tabindex: '-1' });
   const status = h('div', { class: 'remote-status' }, h('div', { class: 'spinner small' }), 'Starting secure sign-in browser…');
   const typer = h('input', {
     class: 'remote-typer', type: 'text', placeholder: 'Tap here to type', autocomplete: 'off',
     autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false', enterkeyhint: 'go', 'aria-label': 'Type into the sign-in page',
   });
-  const keyBtn = (label, key, aria) => h('button', { class: 'btn ghost small', type: 'button', 'aria-label': aria || label, onclick: () => send({ t: 'key', key }) }, label);
-  const doneBtn = h('button', { class: 'btn small', type: 'button' }, 'Done');
-  const cancelBtn = h('button', { class: 'btn ghost small', type: 'button' }, 'Cancel');
+  const keyBtn = (label, key, aria) => h('button', { class: 'pill small', type: 'button', 'aria-label': aria || label, onclick: () => send({ t: 'key', key }) }, label);
+  const doneBtn = h('button', { class: 'pill primary small', type: 'button' }, 'Done');
+  const cancelBtn = h('button', { class: 'pill small', type: 'button' }, 'Cancel');
 
   const stage = h('div', { class: 'remote-stage' }, canvas, status);
   const root = h('div', { class: 'remote', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Sign in to ${provider.name}` },
@@ -142,7 +144,7 @@ export async function openSignInBrowser(provider, onChange) {
     status.replaceChildren(...[
       spin ? h('div', { class: 'spinner small' }) : null,
       h('span', {}, text),
-      retry ? h('button', { class: 'btn small', type: 'button', onclick: () => { teardown(); openSignInBrowser(provider, onChange); } }, 'Try again') : null,
+      retry ? h('button', { class: 'pill primary small', type: 'button', onclick: () => { teardown(); openSignInBrowser(onChange); } }, 'Try again') : null,
     ].filter(Boolean));
     status.hidden = false;
   };
@@ -282,11 +284,4 @@ export async function openSignInBrowser(provider, onChange) {
     }
   });
   setTimeout(() => typer.focus({ preventScroll: true }), 300);
-}
-
-export function toast(text) {
-  const t = h('div', { class: 'toast', role: 'status' }, text);
-  document.body.append(t);
-  setTimeout(() => t.classList.add('out'), 2600);
-  setTimeout(() => t.remove(), 3100);
 }

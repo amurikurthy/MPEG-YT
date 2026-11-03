@@ -9,10 +9,10 @@ const { run } = require('../util/exec');
  *
  * Chromium runs on a private virtual X display; ffmpeg captures that display as
  * MPEG-1 (JSMpeg's low-latency live mode) and the client sends taps/keys back,
- * which are injected with xdotool. Once the user has signed in, the provider
+ * which are injected with xdotool. Once the user has signed in, the account module
  * extracts the session cookies from the profile and the browser is torn down.
  *
- * Reusable by any provider whose only practical login is a web form.
+ * The browser exists only for the few minutes the sign-in takes.
  */
 class BrowserLoginSession {
   /**
@@ -187,7 +187,7 @@ class BrowserLoginSession {
     } catch { /* no match */ }
   }
 
-  /** Close Chromium cleanly (flushes cookies to disk), then hand over to the provider. */
+  /** Close Chromium cleanly (flushes cookies to disk), then hand over to the account module. */
   async finish() {
     if (this.state !== 'running') return this.status();
     this.state = 'finishing';

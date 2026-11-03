@@ -4,23 +4,24 @@
 services:
   mpeg-yt:
     image: ghcr.io/amurikurthy/mpeg-yt:latest
-    # build: .                       # uncomment to build from this checkout instead
+    # build: .                     # uncomment to build from this checkout instead
     container_name: mpeg-yt
     ports:
-      - "8080:8080"                  # not needed if a reverse proxy in the same compose project connects to mpeg-yt:8080"
+      - "8080:8080"                # not needed if a reverse proxy in this compose project connects to mpeg-yt:8080
     environment:
-      DEFAULT_HEIGHT: "720"          # default stream resolution
-      MAX_HEIGHT: "1080"             # cap (MPEG-1 is CPU-heavy; lower this on small hosts)
-      # MAX_STREAMS: "4"             # concurrent transcodes
-      # AUTH_TOKEN: change-me        # recommended if reachable beyond your LAN; open /?token=change-me once
-      # YOUTUBE_MARK_WATCHED: "1"    # when signed in, add what you play to your YouTube history
+      YT_LOCATION: "US"            # region for YouTube data (home feed, trending topics)
+      YT_LANG: "en"
+      # VIDEO_BITRATE_KBPS: "3500" # MPEG-1 at 720p/30
+      # AUDIO_LOUDNESS: "-12"      # LUFS; other apps play around -14
+      # MAX_STREAMS: "4"           # concurrent transcodes
+      # AUTH_TOKEN: change-me      # recommended if reachable beyond your LAN; open /?token=change-me once
+      # YOUTUBE_MARK_WATCHED: "0"  # don't add what you play to your YouTube history
       # PUID: "1000"               # owner of the files in ./config (default 1000:1000)
       # PGID: "1000"
-      # TZ: Europe/London
     volumes:
-      - ./config:/config             # your YouTube sign-in is saved here
+      - ./config:/config           # your YouTube sign-in is saved here
       - cache:/cache
-    shm_size: "512mb"                # for the temporary sign-in browser
+    shm_size: "512mb"              # for the temporary sign-in browser
     restart: unless-stopped
 
 volumes:

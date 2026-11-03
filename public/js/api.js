@@ -1,52 +1,78 @@
-// Thin client for the provider-agnostic REST API, with an in-memory cache and
-// in-flight de-duplication so back/forward navigation and hover-prefetch are instant.
+// Client for the MPEG-YT API, with an in-memory cache and in-flight de-duplication
+// so back/forward navigation and hover-prefetch are instant.
 
 const cache = new Map(); // url -> { exp, promise }
 const DEFAULT_TTL = 5 * 60_000;
 
+async function request(url, opts = {}) {
+  const r = await fetch(url, { credentials: 'same-origin', ...opts });
+  let data = null;
+  try {
+    data = await r.json();
+  } catch { /* empty */ }
+  if (!r.ok) {
+    const err = new Error((data && data.error) || r.statusText);
+    err.status = r.status;
+    throw err;
+  }
+  return data;
+}
+
 function get(url, { ttl = DEFAULT_TTL } = {}) {
   const hit = cache.get(url);
   if (hit && hit.exp > Date.now()) return hit.promise;
-  const promise = fetch(url, { credentials: 'same-origin' }).then(async (r) => {
-    if (r.ok) return r.json();
-    let msg = r.statusText;
-    try {
-      msg = (await r.json()).error || msg;
-    } catch { /* ignore */ }
-    throw new Error(msg);
-  });
+  const promise = request(url);
   cache.set(url, { exp: Date.now() + ttl, promise });
   promise.catch(() => cache.delete(url));
   return promise;
 }
 
+function post(url, body) {
+  return request(url, {
+    method: 'POST',
+    headers: { 'X-MPEG-YT': '1', 'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json' },
+    body: typeof body === 'string' ? body : JSON.stringify(body || {}),
+  });
+}
+
 const enc = encodeURIComponent;
-const base = (pid) => `/api/p/${enc(pid)}`;
+const qs = (o) => Object.entries(o).filter(([, v]) => v != null && v !== '').map(([k, v]) => `${k}=${enc(v)}`).join('&');
 
 export const api = {
-  providers: () => get('/api/providers', { ttl: Infinity }),
-  home: (pid) => get(`${base(pid)}/home`),
-  search: (pid, q, page = 1) => get(`${base(pid)}/search?q=${enc(q)}&page=${page}`),
-  suggest: (pid, q) => get(`${base(pid)}/suggest?q=${enc(q)}`, { ttl: 30 * 60_000 }),
-  item: (pid, id) => get(`${base(pid)}/item/${enc(id)}`, { ttl: 30 * 60_000 }),
-  related: (pid, id) => get(`${base(pid)}/related/${enc(id)}`, { ttl: 30 * 60_000 }),
-  collection: (pid, id) => get(`${base(pid)}/collection/${enc(id)}`),
+  session: () => request('/api/session'),
+  home: (chip) => get(`/api/home?${qs({ chip })}`),
+  search: (q, f = {}) => get(`/api/search?${qs({ q, ...f })}`),
+  suggest: (q) => get(`/api/suggest?q=${enc(q)}`, { ttl: 30 * 60_000 }),
+  video: (id) => get(`/api/video/${enc(id)}`, { ttl: 10 * 60_000 }),
+  comments: (id, sort) => get(`/api/comments/${enc(id)}?${qs({ sort })}`, { ttl: 60_000 }),
+  channel: (id, sort) => get(`/api/channel/${enc(id)}?${qs({ sort })}`),
+  feed: (name) => get(`/api/feed/${enc(name)}`, { ttl: 60_000 }),
+  playlist: (id) => get(`/api/playlist/${enc(id)}`, { ttl: 60_000 }),
+  more: (token) => request(`/api/more/${enc(token)}`),
+  action: (type, id) => post('/api/action', { type, id }).then((r) => {
+    // Lists that the action changes.
+    for (const k of [...cache.keys()]) if (/\/api\/(feed|playlist|video)/.test(k)) cache.delete(k);
+    return r;
+  }),
+  account: {
+    status: () => request('/api/account'),
+    login: () => post('/api/account/login'),
+    finish: () => post('/api/account/login/finish'),
+    cancel: () => post('/api/account/login/cancel'),
+    cookies: (text) => post('/api/account/cookies', text),
+    logout: () => post('/api/account/logout'),
+  },
   /** Drop cached responses (e.g. after signing in or out: feeds differ per account). */
   clear() {
     cache.clear();
   },
-  /** Peek at a cached value without fetching (used for instant first paint). */
-  peek(url) {
-    const hit = cache.get(url);
-    return hit && hit.exp > Date.now() ? hit.promise : null;
-  },
 };
 
-/** Hover-prefetch: warms both the browser cache and the server's resolver cache. */
+/** Hover-prefetch: video details (instant watch page) + server-side stream resolution. */
 const prefetched = new Set();
-export function prefetchItem(pid, id) {
-  const key = `${pid}/${id}`;
-  if (prefetched.has(key)) return;
-  prefetched.add(key);
-  api.item(pid, id).catch(() => prefetched.delete(key));
+export function prefetch(id) {
+  if (!id || prefetched.has(id)) return;
+  prefetched.add(id);
+  api.video(id).catch(() => prefetched.delete(id));
+  fetch(`/api/prefetch/${enc(id)}`, { credentials: 'same-origin' }).catch(() => {});
 }

@@ -13,24 +13,27 @@ module.exports = {
   /** Optional shared secret. If set, open the UI once with ?token=<secret>. */
   authToken: env.AUTH_TOKEN || '',
 
-  /** Comma-separated provider ids (built-in) or absolute paths to provider modules. */
-  providers: list(env.PROVIDERS, ['youtube']),
-
+  /** Everything is streamed as MPEG-1 at up to 720p and 30 fps. */
   stream: {
-    /** Seconds of media the client may buffer ahead before the server pauses ffmpeg. */
+    maxHeight: 720,
+    maxFps: 30,
+    videoKbps: num(env.VIDEO_BITRATE_KBPS, 3500),
+    audioBitrate: env.AUDIO_BITRATE || '192k',
+    /**
+     * Loudness target in LUFS. Other apps (Spotify, YouTube's own app) play around
+     * -14 LUFS; a little louder by default because MPEG-YT has no OS-level boost.
+     * Set AUDIO_NORMALIZE=0 to pass audio through at its original level.
+     */
+    loudnessTarget: num(env.AUDIO_LOUDNESS, -12),
+    normalizeAudio: !/^(0|false|no)$/i.test(env.AUDIO_NORMALIZE || ''),
+    /** Seconds the client may buffer before ffmpeg is paused. */
     bufferAhead: num(env.BUFFER_AHEAD, 10),
-    maxHeight: num(env.MAX_HEIGHT, 1080),
-    defaultHeight: num(env.DEFAULT_HEIGHT, 720),
-    /** Multiplies the per-resolution video bitrate table in stream/transcoder.js. */
-    bitrateScale: num(env.BITRATE_SCALE, 1),
-    audioBitrate: env.AUDIO_BITRATE || '160k',
     ffmpegThreads: num(env.FFMPEG_THREADS, 0),
     maxConcurrent: num(env.MAX_STREAMS, 8),
   },
 
   bin: {
     ffmpeg: env.FFMPEG_PATH || 'ffmpeg',
-    ffprobe: env.FFPROBE_PATH || 'ffprobe',
     ytdlp: env.YTDLP_PATH || 'yt-dlp',
     chromium: env.CHROMIUM_PATH || 'chromium',
     xvfb: env.XVFB_PATH || 'Xvfb',
@@ -38,7 +41,7 @@ module.exports = {
   },
 
   cacheDir: env.CACHE_DIR || '/tmp/mpeg-yt-cache',
-  /** Persistent state: saved sign-in cookies. Mount it as a volume. */
+  /** Persistent state: the saved sign-in. Mount it as a volume. */
   configDir: env.CONFIG_DIR || '/config',
 
   /** In-app sign-in browser (see login/browser-session.js). */
@@ -51,33 +54,12 @@ module.exports = {
   },
 
   youtube: {
-    /**
-     * Optional: path to a Netscape cookies.txt. Normally unnecessary - sign in from the
-     * app instead, which saves cookies to CONFIG_DIR/youtube-cookies.txt.
-     */
+    lang: env.YT_LANG || 'en',
+    location: env.YT_LOCATION || 'US',
+    /** Optional: a cookies.txt you manage yourself instead of signing in from the app. */
     cookiesFile: env.YTDLP_COOKIES || '',
-    /** "Label=feed" pairs shown on the home page when signed in (yt-dlp feed keywords). */
-    accountFeeds: list(env.YOUTUBE_FEEDS, [
-      'Recommended=:ytrec',
-      'Subscriptions=:ytsubs',
-      'Watch later=:ytwatchlater',
-      'Liked videos=:ytfav',
-    ]),
-    /** When signed in, report played videos to YouTube watch history (improves recommendations). */
-    markWatched: /^(1|true|yes)$/i.test(env.YOUTUBE_MARK_WATCHED || ''),
-    /** Explicitly configured topic shelves are kept even when signed in. */
-    homeShelvesExplicit: !!env.YOUTUBE_HOME,
     extraArgs: list(env.YTDLP_EXTRA_ARGS, []),
-    /** "Label=query" pairs used to build the home page shelves. */
-    homeShelves: list(env.YOUTUBE_HOME, [
-      'Trending=trending today',
-      'Music=new music videos',
-      'Gaming=gaming highlights',
-      'Science & Tech=science technology explained',
-    ]),
-  },
-
-  local: {
-    mediaDir: env.MEDIA_DIR || '/media',
+    /** When signed in, report played videos to YouTube watch history. On by default, like YouTube. */
+    markWatched: !/^(0|false|no)$/i.test(env.YOUTUBE_MARK_WATCHED || ''),
   },
 };

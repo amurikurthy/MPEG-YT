@@ -1,53 +1,72 @@
 import { api } from './api.js';
-import { h, href, errorBox, icon } from './ui.js';
+import { h, icon, avatar, popover, closeMenus, errorBox, toast, href } from './ui.js';
 import { prefs } from './state.js';
-import { openAccount } from './account.js';
+import { openSignIn } from './account.js';
 import * as home from './views/home.js';
-import * as search from './views/search.js';
+import * as results from './views/results.js';
 import * as watch from './views/watch.js';
-import * as collection from './views/collection.js';
+import * as channel from './views/channel.js';
+import * as library from './views/library.js';
 
-const view = document.getElementById('view');
-const providerNav = document.getElementById('providers');
-const form = document.getElementById('search');
-const input = document.getElementById('q');
-const suggestEl = document.getElementById('suggest');
+const $ = (s) => document.querySelector(s);
+const view = $('#view');
 
-const ctx = { providers: [], stream: null, pid: null };
+/** Shared app state (also used by components via window.mpegyt). */
+const app = (window.mpegyt = {
+  session: { signedIn: false, subscriptions: [], methods: [], stream: { bufferAhead: 10 } },
+  navigate,
+  refreshSession,
+  signIn: () => openSignIn(onAccountChange),
+});
+
+// ---------- routing (History API: same URLs as youtube.com) ----------
+
 let cleanup = null;
-let renderSeq = 0;
-const scrollPos = new Map();
+let seq = 0;
+const scroll = new Map();
 
-// ---------- routing ----------
-// #/<pid>                     provider home
-// #/<pid>/search?q=...        search results
-// #/<pid>/watch/<id>?t=..     watch page
-// #/<pid>/c/<id>              collection (channel / playlist / folder)
-
-function parseHash() {
-  const raw = location.hash.replace(/^#\/?/, '');
-  const [path, query = ''] = raw.split('?');
-  const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-  return { parts, params: new URLSearchParams(query) };
+function navigate(url, { replace = false } = {}) {
+  closeMenus();
+  scroll.set(location.pathname + location.search, window.scrollY);
+  if (replace) history.replaceState({}, '', url);
+  else history.pushState({}, '', url);
+  route();
 }
 
-async function route() {
-  const seq = ++renderSeq;
-  const { parts, params } = parseHash();
-  const known = (id) => ctx.providers.some((p) => p.id === id);
+window.addEventListener('popstate', () => route(true));
 
-  let pid = parts[0];
-  if (!pid || !known(pid)) {
-    const fallback = known(prefs.get('provider')) ? prefs.get('provider') : ctx.providers[0]?.id;
-    if (!fallback) return renderFatal('No sources are enabled on the server.');
-    location.replace(href.home(fallback));
-    return;
-  }
-  ctx.pid = pid;
-  prefs.set('provider', pid);
-  renderProviderNav();
-  renderAccountButton();
+// Intercept same-origin links so navigation never reloads the page.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[href]');
+  if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || a.target) return;
+  const url = new URL(a.href, location.href);
+  if (url.origin !== location.origin || url.pathname.startsWith('/api/')) return;
+  e.preventDefault();
+  navigate(url.pathname + url.search);
+});
 
+function match() {
+  const p = location.pathname;
+  const params = new URLSearchParams(location.search);
+  if (p === '/' || p === '/index.html') return ['home', () => home.render(ctx(params))];
+  if (p === '/results') return ['results', () => results.render(ctx(params))];
+  if (p === '/watch' && params.get('v')) return ['watch', () => watch.render(ctx(params))];
+  let m;
+  if ((m = /^\/channel\/(UC[\w-]{22})\/?/.exec(p))) return ['channel', () => channel.render({ ...ctx(params), id: m[1] })];
+  if ((m = /^\/(@[^/]+)\/?/.exec(p))) return ['channel', () => channel.render({ ...ctx(params), id: decodeURIComponent(m[1]) })];
+  if ((m = /^\/feed\/(subscriptions|history|you|playlists)\/?$/.exec(p))) return [m[1], () => library.render({ ...ctx(params), page: m[1] })];
+  if (p === '/playlist' && params.get('list')) return ['playlist', () => library.render({ ...ctx(params), page: 'playlist', list: params.get('list') })];
+  return ['404', () => view.replaceChildren(errorBox('This page isn’t available.'))];
+}
+
+function ctx(params) {
+  const mySeq = seq;
+  return { view, params, app, isCurrent: () => mySeq === seq };
+}
+
+async function route(isPop = false) {
+  seq++;
+  const mySeq = seq;
   if (cleanup) {
     try {
       cleanup();
@@ -56,114 +75,148 @@ async function route() {
     }
     cleanup = null;
   }
-
-  const action = parts[1];
-  const provider = ctx.providers.find((p) => p.id === pid);
-  input.placeholder = provider.capabilities.search ? `Search ${provider.name}` : 'Search unavailable';
-  input.disabled = !provider.capabilities.search;
-  if (action !== 'search') input.value = '';
-
-  const args = { ctx, provider, pid, params, view, isCurrent: () => seq === renderSeq };
+  closeMenus();
+  closeDrawer();
+  const [page, render] = match();
+  document.body.dataset.page = page;
+  renderGuide();
+  syncSearchBox();
   view.replaceChildren();
-  document.body.dataset.view = action || 'home';
-
-  let fn;
-  if (!action) fn = () => home.render(args);
-  else if (action === 'search') {
-    input.value = params.get('q') || '';
-    fn = () => search.render({ ...args, query: params.get('q') || '' });
-  } else if (action === 'watch' && parts[2]) fn = () => watch.render({ ...args, id: parts.slice(2).join('/') });
-  else if (action === 'c' && parts[2]) fn = () => collection.render({ ...args, id: parts.slice(2).join('/') });
-  else fn = () => view.replaceChildren(errorBox('Page not found.'));
-
-  const result = await fn();
-  if (seq !== renderSeq) {
+  document.title = 'MPEG-YT';
+  const result = await render();
+  if (mySeq !== seq) {
     if (typeof result === 'function') result();
     return;
   }
   cleanup = typeof result === 'function' ? result : null;
-
-  // Restore scroll for back/forward, otherwise go to top.
-  const y = scrollPos.get(location.hash);
-  window.scrollTo(0, action === 'watch' ? 0 : y || 0);
+  const key = location.pathname + location.search;
+  window.scrollTo(0, isPop && page !== 'watch' ? scroll.get(key) || 0 : 0);
 }
 
-window.addEventListener('hashchange', () => {
-  hideSuggest();
-  route();
-});
-// Remember scroll position of the page we're leaving.
-let lastHash = location.hash;
-window.addEventListener('scroll', () => { scrollPos.set(lastHash, window.scrollY); }, { passive: true });
-window.addEventListener('hashchange', () => { lastHash = location.hash; });
+// ---------- guide (left navigation) ----------
 
-// ---------- account ----------
+const guide = $('#guide');
+const miniGuide = $('#mini-guide');
+const scrim = $('#scrim');
 
-const accountBtn = document.getElementById('account');
-function renderAccountButton() {
-  const p = ctx.providers.find((x) => x.id === ctx.pid);
-  accountBtn.hidden = !p?.account;
-  if (!p?.account) return;
-  accountBtn.classList.toggle('signed-in', !!p.account.signedIn);
-  accountBtn.replaceChildren(icon('account', 22));
-  accountBtn.setAttribute('aria-label', p.account.signedIn ? `Signed in to ${p.name}` : `Sign in to ${p.name}`);
+function guideMode() {
+  const page = document.body.dataset.page;
+  const w = window.innerWidth;
+  if (page === 'watch' || w < 792) return 'drawer'; // hidden until the menu button opens it
+  if (w >= 1312 && prefs.get('guideExpanded', true)) return 'full';
+  return 'mini';
 }
-function showAccount() {
-  const p = ctx.providers.find((x) => x.id === ctx.pid);
-  if (!p?.account) return;
-  openAccount(p, (acct) => {
-    p.account = { ...p.account, ...acct };
-    api.clear(); // feeds and results differ per account
-    renderAccountButton();
-    route();
-  });
-}
-accountBtn.addEventListener('click', showAccount);
-window.addEventListener('mpegyt:account', showAccount);
 
-function renderProviderNav() {
-  if (ctx.providers.length < 2) {
-    providerNav.hidden = true;
-    return;
+function applyGuideMode() {
+  const mode = guideMode();
+  document.body.dataset.guide = mode;
+}
+window.addEventListener('resize', applyGuideMode);
+
+$('#guide-btn').addEventListener('click', () => {
+  const mode = guideMode();
+  if (mode === 'drawer' || (mode === 'mini' && window.innerWidth < 1312)) {
+    document.body.classList.toggle('drawer-open');
+    scrim.hidden = !document.body.classList.contains('drawer-open');
+  } else {
+    prefs.set('guideExpanded', mode !== 'full');
+    applyGuideMode();
   }
-  providerNav.hidden = false;
-  providerNav.replaceChildren(...ctx.providers.map((p) =>
-    h('a', { href: href.home(p.id), class: p.id === ctx.pid ? 'on' : '', 'aria-current': p.id === ctx.pid ? 'page' : null }, p.name)));
+});
+scrim.addEventListener('click', closeDrawer);
+function closeDrawer() {
+  document.body.classList.remove('drawer-open');
+  scrim.hidden = true;
 }
 
-function renderFatal(msg) {
-  view.replaceChildren(errorBox(msg, () => location.reload()));
+function guideLink(path, label, iconName, opts = {}) {
+  const active = location.pathname === path || (opts.match && opts.match());
+  return h('a', { class: `guide-item${active ? ' on' : ''}`, href: path, title: label },
+    opts.img ? avatar(opts.img, 24) : icon(iconName), h('span', {}, label));
 }
 
-// ---------- search + suggestions ----------
+function renderGuide() {
+  applyGuideMode();
+  const s = app.session;
+  const sections = [
+    h('div', { class: 'guide-section' },
+      guideLink('/', 'Home', 'home'),
+      guideLink('/feed/subscriptions', 'Subscriptions', 'subscriptions')),
+    h('div', { class: 'guide-section' },
+      h('a', { class: 'guide-heading', href: '/feed/you' }, 'You', icon('chevronRight', 20)),
+      guideLink('/feed/history', 'History', 'history'),
+      s.signedIn ? guideLink('/feed/playlists', 'Playlists', 'playlists') : null,
+      s.signedIn ? guideLink('/playlist?list=WL', 'Watch later', 'watchlater', { match: () => location.search.includes('list=WL') }) : null,
+      s.signedIn ? guideLink('/playlist?list=LL', 'Liked videos', 'liked', { match: () => location.search.includes('list=LL') }) : null),
+  ];
+  if (s.signedIn && s.subscriptions?.length) {
+    sections.push(h('div', { class: 'guide-section' },
+      h('div', { class: 'guide-heading' }, 'Subscriptions'),
+      s.subscriptions.map((c) => guideLink(`/channel/${c.id}`, c.name, null, { img: c.avatar }))));
+  } else if (!s.signedIn) {
+    sections.push(h('div', { class: 'guide-section guide-signin' },
+      h('p', {}, 'Sign in to like videos, comment, and subscribe.'),
+      signInButton()));
+  }
+  sections.push(h('div', { class: 'guide-footer' },
+    h('button', { class: 'guide-item', type: 'button', onclick: toggleTheme }, icon('appearance'), h('span', {}, `Appearance: ${prefs.get('theme', 'dark') === 'light' ? 'Light' : 'Dark'}`)),
+    h('p', { class: 'guide-fine' }, 'MPEG-YT · video streamed as MPEG-1 to a WebGL canvas')));
+  guide.replaceChildren(...sections);
 
+  miniGuide.replaceChildren(
+    miniItem('/', 'Home', 'home'),
+    miniItem('/feed/subscriptions', 'Subscriptions', 'subscriptions'),
+    miniItem('/feed/you', 'You', 'you'),
+    miniItem('/feed/history', 'History', 'history'));
+}
+
+function miniItem(path, label, iconName) {
+  return h('a', { class: `mini-item${location.pathname === path ? ' on' : ''}`, href: path }, icon(iconName), h('span', {}, label));
+}
+
+// ---------- masthead: search ----------
+
+const form = $('#search');
+const input = $('#q');
+const clearBtn = $('#q-clear');
+const suggestEl = $('#suggest');
 let suggestions = [];
 let selected = -1;
 let suggestTimer;
 let suggestSeq = 0;
 
+function syncSearchBox() {
+  const q = location.pathname === '/results' ? new URLSearchParams(location.search).get('search_query') || '' : '';
+  if (document.activeElement !== input) input.value = q;
+  clearBtn.hidden = !input.value;
+  document.body.classList.remove('mobile-search');
+}
+
 form.addEventListener('submit', (e) => {
   e.preventDefault();
   const q = input.value.trim();
-  if (!q || !ctx.pid) return;
+  if (!q) return;
   hideSuggest();
   input.blur();
-  location.hash = href.search(ctx.pid, q);
+  navigate(href.results(q));
 });
-
+clearBtn.addEventListener('click', () => {
+  input.value = '';
+  clearBtn.hidden = true;
+  hideSuggest();
+  input.focus();
+});
 input.addEventListener('input', () => {
+  clearBtn.hidden = !input.value;
   clearTimeout(suggestTimer);
   const q = input.value.trim();
-  const provider = ctx.providers.find((p) => p.id === ctx.pid);
-  if (!q || !provider?.capabilities.suggest) return hideSuggest();
+  if (!q) return hideSuggest();
   suggestTimer = setTimeout(async () => {
-    const seq = ++suggestSeq;
-    const list = await api.suggest(ctx.pid, q).catch(() => []);
-    if (seq !== suggestSeq || input.value.trim() !== q) return;
-    showSuggest(list);
-  }, 90);
+    const mySeq = ++suggestSeq;
+    const list = await api.suggest(q).catch(() => []);
+    if (mySeq === suggestSeq && input.value.trim() === q) showSuggest(list);
+  }, 80);
 });
-
 input.addEventListener('keydown', (e) => {
   if (suggestEl.hidden) return;
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -174,6 +227,7 @@ input.addEventListener('keydown', (e) => {
     input.value = suggestions[selected];
   } else if (e.key === 'Escape') hideSuggest();
 });
+input.addEventListener('focus', () => input.value.trim() && suggestions.length && (suggestEl.hidden = false));
 input.addEventListener('blur', () => setTimeout(hideSuggest, 150));
 
 function showSuggest(list) {
@@ -187,15 +241,14 @@ function showSuggest(list) {
       input.value = s;
       form.requestSubmit();
     },
-  }, s)));
+  }, icon('search', 20), h('span', {}, s))));
   suggestEl.hidden = false;
 }
 function hideSuggest() {
   suggestEl.hidden = true;
-  suggestions = [];
 }
 
-// "/" focuses search (like most media sites); ignored while typing.
+// "/" focuses search, like on YouTube.
 document.addEventListener('keydown', (e) => {
   if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) {
     e.preventDefault();
@@ -204,34 +257,109 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------- theme (dark default) ----------
+// Small screens: the search box opens over the masthead.
+$('#search-open').addEventListener('click', () => {
+  document.body.classList.add('mobile-search');
+  input.focus();
+});
+$('#search-back').addEventListener('click', () => document.body.classList.remove('mobile-search'));
 
-const themeBtn = document.getElementById('theme');
-function applyTheme(t) {
-  const light = t === 'light';
+// Voice search where the browser supports it (Chrome, Edge, Safari).
+const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const voiceBtn = $('#voice');
+if (Recognition) {
+  voiceBtn.hidden = false;
+  voiceBtn.addEventListener('click', () => {
+    const rec = new Recognition();
+    rec.lang = navigator.language || 'en-US';
+    rec.interimResults = true;
+    voiceBtn.classList.add('listening');
+    toast('Listening…');
+    rec.onresult = (e) => {
+      const text = [...e.results].map((r) => r[0].transcript).join('');
+      input.value = text;
+      if (e.results[e.results.length - 1].isFinal) form.requestSubmit();
+    };
+    rec.onend = () => voiceBtn.classList.remove('listening');
+    rec.onerror = () => toast('Didn’t catch that. Try again.');
+    rec.start();
+  });
+}
+
+// ---------- masthead: account ----------
+
+const accountSlot = $('#account-slot');
+
+function signInButton() {
+  return h('button', { class: 'signin-btn', type: 'button', onclick: () => app.signIn() }, icon('you'), 'Sign in');
+}
+
+function renderAccount() {
+  const s = app.session;
+  if (!s.signedIn) {
+    const settings = h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Settings' }, icon('more'));
+    settings.addEventListener('click', () => popover(settings, [
+      { icon: 'appearance', label: `Appearance: ${prefs.get('theme', 'dark') === 'light' ? 'Light' : 'Dark'}`, run: toggleTheme },
+    ]));
+    accountSlot.replaceChildren(settings, signInButton());
+    return;
+  }
+  const me = s.me || {};
+  const btn = h('button', { class: 'me-btn', type: 'button', 'aria-label': 'Account menu' }, avatar(me.avatar, 32));
+  btn.addEventListener('click', () => {
+    const menu = popover(btn, [
+      { icon: 'you', label: 'Your history & playlists', run: () => navigate('/feed/you') },
+      { icon: 'appearance', label: `Appearance: ${prefs.get('theme', 'dark') === 'light' ? 'Light' : 'Dark'}`, run: toggleTheme },
+      {
+        icon: 'logout',
+        label: 'Sign out',
+        run: async () => {
+          await api.account.logout().catch((e) => toast(e.message));
+          onAccountChange();
+          toast('Signed out');
+        },
+      },
+    ]);
+    menu.classList.add('account-menu');
+    menu.prepend(h('div', { class: 'account-head' }, avatar(me.avatar, 40), h('div', {}, h('strong', {}, me.name || 'Your account'), me.handle ? h('div', { class: 'muted small' }, me.handle) : null)));
+  });
+  accountSlot.replaceChildren(btn);
+}
+
+async function refreshSession() {
+  try {
+    app.session = { ...app.session, ...(await api.session()) };
+  } catch { /* keep previous */ }
+  renderAccount();
+  renderGuide();
+}
+
+async function onAccountChange() {
+  api.clear(); // feeds and recommendations differ per account
+  await refreshSession();
+  route();
+}
+
+// ---------- theme ----------
+
+function toggleTheme() {
+  const next = prefs.get('theme', 'dark') === 'light' ? 'dark' : 'light';
+  prefs.set('theme', next);
+  applyTheme();
+  renderGuide();
+}
+function applyTheme() {
+  const light = prefs.get('theme', 'dark') === 'light';
   if (light) document.documentElement.dataset.theme = 'light';
   else delete document.documentElement.dataset.theme;
   document.querySelector('meta[name=color-scheme]').content = light ? 'light' : 'dark';
-  document.querySelector('meta[name=theme-color]').content = light ? '#f7f8fa' : '#0e0f13';
-  themeBtn.replaceChildren(icon(light ? 'moon' : 'sun', 20));
-  themeBtn.setAttribute('aria-label', light ? 'Switch to dark mode' : 'Switch to light mode');
+  document.querySelector('meta[name=theme-color]').content = light ? '#ffffff' : '#0f0f0f';
 }
-applyTheme(prefs.get('theme', 'dark'));
-themeBtn.addEventListener('click', () => {
-  const next = prefs.get('theme', 'dark') === 'light' ? 'dark' : 'light';
-  prefs.set('theme', next);
-  applyTheme(next);
-});
 
 // ---------- boot ----------
 
-(async function boot() {
-  try {
-    const data = await api.providers();
-    ctx.providers = data.providers;
-    ctx.stream = data.stream;
-  } catch (e) {
-    return renderFatal(`Cannot reach the server: ${e.message}`);
-  }
-  route();
-})();
+applyTheme();
+renderAccount();
+renderGuide();
+route();
+refreshSession();

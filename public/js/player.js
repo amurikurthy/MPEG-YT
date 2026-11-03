@@ -91,19 +91,18 @@ class SocketSource {
 }
 
 /**
- * Player UI + session management. Every (re)start - initial load, seek, or a
- * change of resolution / frame rate / quality - opens a new stream on a fresh
- * canvas stacked on top of the old one; the old canvas keeps showing its last
- * frame until the new stream decodes its first frame, so there is no black flash.
+ * Player UI + session management. Every (re)start - initial load or a seek - opens
+ * a new stream on a fresh canvas stacked on top of the old one; the old canvas keeps
+ * showing its last frame until the new stream decodes its first frame, so there is
+ * no black flash. Output is always up to 720p / 30 fps (decided by the server).
  */
 export class CanvasPlayer {
   /**
    * @param {HTMLElement} mount
-   * @param {object} o  { pid, id, startAt, streamCfg, detail?, onEnded?, onProgress? }
+   * @param {object} o  { id, startAt, streamCfg, detail?, onEnded?, onProgress?, onNext?, onTheater? }
    */
   constructor(mount, o) {
     this.o = o;
-    this.pid = o.pid;
     this.id = o.id;
     this.streamCfg = o.streamCfg;
     this.detail = o.detail || null;
@@ -121,9 +120,6 @@ export class CanvasPlayer {
 
     this.volume = prefs.get('volume', 1);
     this.muted = prefs.get('muted', false);
-    this.height = prefs.get('height', this.streamCfg.defaultHeight);
-    this.fps = prefs.get('fps', 'auto');
-    this.preset = prefs.get('preset', 'standard');
 
     this.buildDom(mount);
     this.bindEvents();
@@ -152,22 +148,22 @@ export class CanvasPlayer {
     this.volBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Mute (m)' }, icon('volume'));
     this.volRange = h('input', { class: 'vol', type: 'range', min: '0', max: '1', step: '0.02', value: String(this.volume), 'aria-label': 'Volume' });
     this.timeEl = h('div', { class: 'time' }, '0:00');
-    this.badge = h('button', { class: 'q-badge', type: 'button', 'aria-label': 'Stream settings' }, '');
-    this.gearBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Settings' }, icon('settings'));
-    this.fsBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Fullscreen (f)' }, icon('fullscreen'));
-    this.menu = h('div', { class: 'menu', hidden: true, role: 'dialog', 'aria-label': 'Stream settings' });
+    this.nextBtn = this.o.onNext ? h('button', { class: 'ctl', type: 'button', 'aria-label': 'Next (Shift+N)', title: 'Next (Shift+N)' }, icon('next')) : null;
+    this.theaterBtn = this.o.onTheater ? h('button', { class: 'ctl', type: 'button', 'aria-label': 'Theater mode (t)', title: 'Theater mode (t)' }, icon('theater')) : null;
+    this.fsBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Full screen (f)', title: 'Full screen (f)' }, icon('fullscreen'));
 
     this.controls = h('div', { class: 'controls' },
       this.seek,
       h('div', { class: 'row' },
         this.playBtn,
+        this.nextBtn,
         h('div', { class: 'volume' }, this.volBtn, this.volRange),
         this.timeEl,
         h('div', { class: 'spacer' }),
-        this.badge, this.gearBtn, this.fsBtn));
+        this.theaterBtn, this.fsBtn));
 
     this.root = h('div', { class: 'player', tabindex: '0' },
-      this.stage, this.spinner, this.center, this.unmute, this.errorEl, this.endScreen, this.controls, this.menu);
+      this.stage, this.spinner, this.center, this.unmute, this.errorEl, this.endScreen, this.controls);
     mount.append(this.root);
     this.syncVolumeUi();
   }
@@ -177,7 +173,6 @@ export class CanvasPlayer {
     // Mouse: click = play/pause, double-click = fullscreen.
     this.stage.addEventListener('click', () => {
       if (this.lastPointer !== 'mouse') return;
-      if (!this.menu.hidden) return this.toggleMenu(false);
       this.toggle();
     });
     this.stage.addEventListener('dblclick', () => this.lastPointer === 'mouse' && this.toggleFullscreen());
@@ -198,8 +193,8 @@ export class CanvasPlayer {
     this.volBtn.addEventListener('click', () => this.setMuted(!this.muted));
     this.volRange.addEventListener('input', () => this.setVolume(+this.volRange.value));
     this.fsBtn.addEventListener('click', () => this.toggleFullscreen());
-    this.gearBtn.addEventListener('click', () => this.toggleMenu());
-    this.badge.addEventListener('click', () => this.toggleMenu());
+    this.nextBtn?.addEventListener('click', () => this.o.onNext());
+    this.theaterBtn?.addEventListener('click', () => this.o.onTheater());
     this.unmute.addEventListener('click', (e) => {
       e.stopPropagation();
       audioCtx()?.resume();
@@ -217,14 +212,14 @@ export class CanvasPlayer {
       r.classList.remove('idle');
       clearTimeout(this.idleTimer);
       this.idleTimer = setTimeout(() => {
-        if (!this.paused && this.menu.hidden && this.dragPos == null) r.classList.add('idle');
+        if (!this.paused && this.dragPos == null) r.classList.add('idle');
       }, this.isTouch ? 3500 : 2600);
     });
     r.addEventListener('pointermove', (e) => e.pointerType === 'mouse' && wake());
     // Touching the control bar keeps it alive; taps on the video are handled by onStageTap.
     r.addEventListener('pointerdown', (e) => (e.pointerType === 'mouse' || !this.stage.contains(e.target)) && wake());
     r.addEventListener('keydown', wake);
-    r.addEventListener('pointerleave', (e) => e.pointerType === 'mouse' && !this.paused && this.menu.hidden && r.classList.add('idle'));
+    r.addEventListener('pointerleave', (e) => e.pointerType === 'mouse' && !this.paused && r.classList.add('idle'));
     wake();
 
     // Seek bar: hover preview + drag.
@@ -291,9 +286,7 @@ export class CanvasPlayer {
   // ---------- stream lifecycle ----------
 
   wsUrl(t) {
-    const q = new URLSearchParams({
-      p: this.pid, id: this.id, t: t.toFixed(2), h: String(this.height), fps: String(this.fps), preset: this.preset,
-    });
+    const q = new URLSearchParams({ id: this.id, t: t.toFixed(2) });
     const tok = new URLSearchParams(location.search).get('token');
     if (tok) q.set('token', tok);
     return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/stream?${q}`;
@@ -324,7 +317,7 @@ export class CanvasPlayer {
       } catch {
         return;
       }
-      if (m.t === 'error') return this.fail(entry, m.message);
+      if (m.t === 'error') return this.fail(entry, m.message, m.code);
       if (m.t === 'meta') {
         entry.meta = m;
         entry.t0 = m.start;
@@ -376,7 +369,7 @@ export class CanvasPlayer {
   }
 
   onControl(entry, m) {
-    if (m.t === 'error') this.fail(entry, m.message);
+    if (m.t === 'error') this.fail(entry, m.message, m.code);
   }
 
   onFrame(entry) {
@@ -393,7 +386,6 @@ export class CanvasPlayer {
     if (this.paused) this.freeze(entry);
     const ctx = audioCtx();
     if (ctx && ctx.state === 'suspended' && !this.paused) this.unmute.hidden = false;
-    this.updateBadge();
   }
 
   onEnded(entry) {
@@ -436,13 +428,16 @@ export class CanvasPlayer {
     if (this.pending === entry) this.pending = null;
   }
 
-  fail(entry, message) {
+  fail(entry, message, code) {
     if (entry.failed || entry.disposed) return;
     entry.failed = true;
     if (entry !== this.active && entry !== this.pending) return;
-    this.errorEl.replaceChildren(
+    const signIn = code === 'signin' && window.mpegyt && !window.mpegyt.session?.signedIn;
+    this.errorEl.replaceChildren(...[
       h('p', {}, message || 'Playback failed.'),
-      h('button', { class: 'btn', type: 'button', onclick: () => this.load(this.position) }, 'Retry'));
+      signIn ? h('button', { class: 'btn', type: 'button', onclick: () => window.mpegyt.signIn() }, 'Sign in') : null,
+      code === 'unavailable' ? null : h('button', { class: `btn${signIn ? ' ghost' : ''}`, type: 'button', onclick: () => this.load(this.position) }, 'Retry'),
+    ].filter(Boolean));
     this.errorEl.hidden = false;
   }
 
@@ -456,7 +451,6 @@ export class CanvasPlayer {
     this.seekable = m.seekable;
     this.live = m.live;
     this.root.classList.toggle('live', !!m.live);
-    if (this.menu && !this.menu.hidden) this.renderMenu();
   }
 
   // ---------- transport ----------
@@ -571,81 +565,13 @@ export class CanvasPlayer {
     this.volBtn.replaceChildren(icon(this.muted || this.volume === 0 ? 'mute' : 'volume'));
   }
 
-  // ---------- settings: resolution / frame rate / quality ----------
-
   setDetail(detail) {
     this.detail = detail;
     if (!this.duration && detail.duration) this.duration = detail.duration;
-    if (!this.menu.hidden) this.renderMenu();
   }
 
-  options() {
-    const d = this.detail;
-    const heights = d?.qualities?.length ? d.qualities : [this.meta?.height || this.height];
-    const src = d?.sourceFps || this.meta?.fps || 30;
-    const rates = (this.streamCfg.frameRates || [24, 25, 30, 50, 60]).filter((r) => r <= src + 1);
-    return { heights, rates, srcFps: src, presets: this.streamCfg.presets || [] };
-  }
-
-  toggleMenu(force) {
-    const show = force ?? this.menu.hidden;
-    this.menu.hidden = !show;
-    this.root.classList.toggle('menu-open', show);
-    if (show) this.renderMenu();
-  }
-
-  renderMenu() {
-    const { heights, rates, srcFps, presets } = this.options();
-    const curH = this.meta?.height;
-    const group = (title, items) => h('div', { class: 'menu-group' }, h('div', { class: 'menu-title' }, title), h('div', { class: 'menu-items' }, items));
-    const opt = (label, selected, onPick, hint) =>
-      h('button', { class: `menu-opt${selected ? ' on' : ''}`, type: 'button', onclick: onPick, 'aria-pressed': selected ? 'true' : 'false' },
-        h('span', { class: 'mark' }, selected ? icon('check', 16) : null), label, hint ? h('span', { class: 'hint' }, hint) : null);
-
-    const effH = curH || this.height;
-    const heightGroup = group('Resolution', [...heights].reverse().map((v) =>
-      opt(`${v}p`, v === effH, () => this.change({ height: v }), v >= 720 ? 'HD' : '')));
-
-    const autoHint = `${Math.round(srcFps)} fps source`;
-    const fpsGroup = group('Frame rate', [
-      opt('Auto', this.fps === 'auto', () => this.change({ fps: 'auto' }), autoHint),
-      ...rates.map((r) => opt(`${r} fps`, String(this.fps) === String(r), () => this.change({ fps: r }))),
-    ]);
-
-    const presetGroup = group('Quality', presets.map((p) => opt(p.label, p.id === this.preset, () => this.change({ preset: p.id }))));
-
-    const m = this.meta;
-    const stats = m
-      ? `${m.height}p · ${m.fps} fps · ${m.kbps} kbit/s MPEG-1${this.startupMs ? ` · started in ${this.startupMs} ms` : ''}`
-      : 'Connecting…';
-    this.statsEl = h('div', { class: 'menu-stats' }, stats);
-
-    this.menu.replaceChildren(heightGroup, fpsGroup, presetGroup, this.statsEl);
-  }
-
-  change({ height, fps, preset }) {
-    if (height !== undefined) {
-      this.height = height;
-      prefs.set('height', height);
-    }
-    if (fps !== undefined) {
-      this.fps = fps;
-      prefs.set('fps', fps);
-    }
-    if (preset !== undefined) {
-      this.preset = preset;
-      prefs.set('preset', preset);
-    }
-    this.renderMenu();
-    this.load(this.position);
-  }
-
-  updateBadge() {
-    const m = this.meta;
-    if (!m) return;
-    const hd = m.height >= 720 ? 'HD' : '';
-    this.badge.textContent = `${m.height}p${m.fps > 31 ? Math.round(m.fps) : ''}`;
-    this.badge.dataset.hd = hd;
+  setTheater(on) {
+    this.theaterBtn?.replaceChildren(icon(on ? 'theaterExit' : 'theater'));
   }
 
   // ---------- misc UI ----------
@@ -694,7 +620,6 @@ export class CanvasPlayer {
       }
       if (Math.hypot(dx, dy) > 24) return; // a drag, not a tap
     }
-    if (!this.menu.hidden) return this.toggleMenu(false);
     const b = this.stage.getBoundingClientRect();
     const x = (e.clientX - b.left) / b.width;
     const side = x < 0.35 ? -1 : x > 0.65 ? 1 : 0;
@@ -803,12 +728,6 @@ export class CanvasPlayer {
       this.center.replaceChildren(icon(centerIcon, 44));
     }
 
-    if (this.statsEl && !this.menu.hidden && this.meta) {
-      const m = this.meta;
-      const s = `${m.height}p · ${m.fps} fps · ${m.kbps} kbit/s MPEG-1 · buffer ${headroom.toFixed(1)}s${this.startupMs ? ` · started in ${this.startupMs} ms` : ''}`;
-      if (this.statsEl.textContent !== s) this.statsEl.textContent = s;
-    }
-
     if (this.o.onProgress && now() - (this.lastReport || 0) > 3000 && e?.started) {
       this.lastReport = now();
       this.o.onProgress(pos, d);
@@ -827,7 +746,8 @@ export class CanvasPlayer {
     else if (k === 'ArrowDown') this.setVolume(this.volume - 0.05);
     else if (k === 'm') this.setMuted(!this.muted);
     else if (k === 'f') this.toggleFullscreen();
-    else if (k === 'Escape' && !this.menu.hidden) this.toggleMenu(false);
+    else if (k === 't' && this.o.onTheater) this.o.onTheater();
+    else if (k === 'N' && e.shiftKey && this.o.onNext) this.o.onNext();
     else if (/^[0-9]$/.test(k) && this.duration) this.seekTo((+k / 10) * this.duration);
     else return false;
     return true;

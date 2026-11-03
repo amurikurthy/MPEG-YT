@@ -8,7 +8,7 @@ let active = 0;
 /**
  * One WebSocket = one playback session = one ffmpeg process.
  *
- * Server -> client:  text   {"t":"meta", start, duration, height, fps, kbps, preset, live}
+ * Server -> client:  text   {"t":"meta", start, duration, height, fps, kbps, live}
  *                    binary MPEG-TS chunks (fed straight into JSMpeg's demuxer)
  *                    text   {"t":"eof"} | {"t":"error", message}
  * Client -> server:  text   {"t":"flow", h}   seconds of media buffered ahead of the playhead
@@ -19,16 +19,14 @@ let active = 0;
  * headroom falls below bufferAhead - 4s. This gives a fast start and seeks
  * plus smooth, buffered playback, instead of JSMpeg's low-latency live mode.
  */
-async function handleStream(ws, params, registry, cfg) {
-  const fail = (message) => {
+async function handleStream(ws, params, streams, cfg) {
+  const fail = (raw) => {
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ t: 'error', message }));
+      ws.send(JSON.stringify({ t: 'error', ...explain(raw) }));
       ws.close(1011, 'error');
     }
   };
 
-  const provider = registry.get(params.get('p'));
-  if (!provider) return fail('unknown provider');
   const id = params.get('id');
   if (!id) return fail('missing id');
   if (active >= cfg.stream.maxConcurrent) return fail('server busy: too many concurrent streams');
@@ -51,15 +49,12 @@ async function handleStream(ws, params, registry, cfg) {
   ws.on('error', cleanup);
 
   const req = {
-    height: params.get('h'),
-    fps: params.get('fps'),
-    preset: params.get('preset'),
     start: params.get('t'),
   };
 
   let media;
   try {
-    media = await provider.resolve(id, { height: +req.height || cfg.stream.defaultHeight, fps: +req.fps || 30 });
+    media = await streams.resolve(id);
   } catch (e) {
     cleanup();
     return fail(e.message);
@@ -74,7 +69,6 @@ async function handleStream(ws, params, registry, cfg) {
     height: p.height,
     fps: p.fps,
     kbps: p.kbps,
-    preset: p.preset,
     live: !!media.live,
     seekable: !!media.seekable,
   }));
@@ -135,4 +129,24 @@ async function handleStream(ws, params, registry, cfg) {
   });
 }
 
-module.exports = { handleStream, activeStreams: () => active };
+/** Turn yt-dlp/ffmpeg failures into something a viewer can act on. */
+function explain(raw) {
+  const msg = String(raw || '');
+  if (/confirm you.?re not a bot|sign in to confirm|LOGIN_REQUIRED/i.test(msg)) {
+    return { code: 'signin', message: 'YouTube wants this server to sign in before it plays videos. Sign in to continue.' };
+  }
+  if (/age.?restricted|confirm your age|inappropriate for some users/i.test(msg)) {
+    return { code: 'signin', message: 'This video is age-restricted. Sign in with an account that can watch it.' };
+  }
+  if (/members.?only|join this channel/i.test(msg)) return { code: 'unavailable', message: 'This video is for channel members only.' };
+  if (/private video/i.test(msg)) return { code: 'unavailable', message: 'This video is private.' };
+  if (/not available in your country|geo.?restrict/i.test(msg)) return { code: 'unavailable', message: 'This video isn’t available in your server’s country.' };
+  if (/video unavailable|has been removed|does not exist/i.test(msg)) return { code: 'unavailable', message: 'This video isn’t available anymore.' };
+  if (/live event will begin|premieres? in/i.test(msg)) return { code: 'unavailable', message: 'This video hasn’t started yet.' };
+  if (/server busy/i.test(msg)) return { code: 'busy', message: 'The server is busy with other streams. Try again in a moment.' };
+  // Keep the useful tail of tool errors, drop the noise.
+  const tail = msg.replace(/^.*?ERROR:\s*(\[[^\]]*\]\s*[\w-]+:\s*)?/s, '').replace(/\s*See\s+https?:\/\/\S+.*$/s, '').trim();
+  return { code: 'error', message: tail || 'Playback failed.' };
+}
+
+module.exports = { handleStream, activeStreams: () => active, explain };
