@@ -84,7 +84,7 @@ class YouTube {
   }
 
   /** Wrap a youtubei.js feed into { items, next } with continuation support. */
-  page(feed, pick = (f) => f.videos, seen = new Set()) {
+  page(feed, pick = (f) => N.ordered(f.page), seen = new Set()) {
     const items = N.items(pick(feed) || [], seen);
     const next = feed.has_continuation
       ? this.keep(async () => this.page(await feed.getContinuation(), pick, seen))
@@ -101,7 +101,7 @@ class YouTube {
         const base = await this.cache.wrap('home', () => yt.getHomeFeed(), 5 * 60_000);
         const chips = (base.filters || []).filter(Boolean);
         const feed = chip && chip !== 'All' && chips.includes(chip) ? await base.applyFilter(chip) : base;
-        const res = this.page(feed, (f) => f.videos);
+        const res = this.page(feed, (f) => N.ordered(f.page));
         if (res.items.length) return { chips: chips.length ? chips : ['All'], chip: chip || chips[0] || 'All', ...res };
       } catch (e) {
         console.warn(`[yt] home feed: ${e.message}`);
@@ -255,7 +255,7 @@ class YouTube {
       let vids = await ch.getVideos();
       sorts = vids.filters || [];
       if (sort && sorts.includes(sort) && sort !== sorts[0]) vids = await vids.applyFilter(sort);
-      list = this.page(vids, (f) => f.videos);
+      list = this.page(vids, (f) => N.ordered(f.page));
     }
     return { channel: header, sorts, sort: sort || sorts[0] || null, ...(list || { items: [], next: null }) };
   }
@@ -267,10 +267,10 @@ class YouTube {
     const yt = await this.session();
     switch (name) {
       case 'subscriptions':
-        return { title: 'Subscriptions', ...this.page(await yt.getSubscriptionsFeed(), (f) => f.videos) };
+        return { title: 'Subscriptions', ...this.page(await yt.getSubscriptionsFeed(), (f) => N.ordered(f.page)) };
       case 'history': {
         const h = await yt.getHistory();
-        return { title: 'Watch history', ...this.page(h, (f) => f.videos) };
+        return { title: 'Watch history', ...this.page(h, (f) => N.ordered(f.page)) };
       }
       case 'watchlater':
         return this.playlist('WL');

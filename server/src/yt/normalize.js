@@ -211,9 +211,36 @@ function fromPlaylist(p) {
   };
 }
 
-/** Map any supported node; unknown or unsupported (e.g. Shorts) -> null. */
+const SHORTS_TYPES = /^(ReelItem|ShortsLockupView|ReelShelf|ShortsShelf|ReelShelfRenderer)$/;
+
+function endpointOf(n) {
+  return n.endpoint || n.on_tap_endpoint || n.navigation_endpoint || n.renderer_context?.command_context?.on_tap || null;
+}
+
+/**
+ * Is this a Short (or a shelf of Shorts)? YouTube marks them in several ways depending
+ * on the feed - dedicated node types, a "SHORT" lockup, a reel endpoint, a /shorts/ URL
+ * or a Shorts thumbnail overlay - and history in particular serves them as ordinary
+ * video items, so check every signal.
+ */
+function isShort(n) {
+  if (!n || typeof n !== 'object') return false;
+  if (SHORTS_TYPES.test(n.type || '')) return true;
+  if (n.type === 'RichItem') return isShort(n.content);
+  if (n.type === 'LockupView' && n.content_type === 'SHORT') return true;
+  const e = endpointOf(n);
+  if (e && (e.name === 'reelWatchEndpoint' || /^\/shorts\//.test(e.metadata?.url || '') || e.metadata?.page_type === 'WEB_PAGE_TYPE_SHORTS')) return true;
+  const overlays = [...(n.thumbnail_overlays || []), ...(n.content_image?.overlays || [])];
+  for (const o of overlays) {
+    if (/SHORTS/i.test(o?.style || '')) return true;
+    if ((o?.badges || []).some((b) => /SHORTS/i.test(b?.badge_style || ''))) return true;
+  }
+  return false;
+}
+
+/** Map any supported node; unknown or unsupported (Shorts) -> null. */
 function item(node) {
-  if (!node) return null;
+  if (!node || isShort(node)) return null;
   switch (node.type) {
     case 'RichItem':
       return item(node.content);
@@ -251,4 +278,49 @@ function items(nodes, seen = new Set()) {
   return out;
 }
 
-module.exports = { item, items, txt, clean, pickImage, parseCount, parseAge, parseDuration, shortViews, author, fixUrl };
+const ITEM_TYPES = new Set([
+  'RichItem', 'LockupView', 'Video', 'CompactVideo', 'GridVideo', 'PlaylistVideo', 'PlaylistPanelVideo',
+  'Channel', 'GridChannel', 'Playlist', 'GridPlaylist', 'CompactPlaylist',
+]);
+// Branches that never contain feed items but can be large.
+const SKIP_KEYS = new Set([
+  'endpoint', 'on_tap', 'on_tap_endpoint', 'navigation_endpoint', 'renderer_context', 'menu', 'payload',
+  'command', 'commands', 'accessibility', 'thumbnails', 'thumbnail', 'contents_memo', 'header', 'sidebar',
+]);
+
+/**
+ * All feed items in document order. (youtubei.js's feed.videos groups items by node
+ * type, which reorders mixed feeds - e.g. history, where Shorts are a different type
+ * and ended up at the top.) Shorts and Shorts shelves are skipped entirely.
+ */
+function ordered(root) {
+  const out = [];
+  const seen = new Set();
+  const walk = (v, depth) => {
+    if (!v || typeof v !== 'object' || depth > 30 || seen.has(v)) return;
+    seen.add(v);
+    // youtubei.js wraps parsed sections (SuperParsedResult) behind item()/array().
+    if (typeof v.item === 'function' && 'is_array' in v) {
+      let inner = null;
+      try {
+        inner = v.is_array ? v.array() : v.is_null ? null : v.item();
+      } catch { /* empty section */ }
+      walk(inner, depth + 1);
+      return;
+    }
+    if (Array.isArray(v)) {
+      for (const x of v) walk(x, depth + 1);
+      return;
+    }
+    if (v.type && isShort(v)) return;
+    if (v.type && ITEM_TYPES.has(v.type)) {
+      out.push(v);
+      return;
+    }
+    for (const k of Object.keys(v)) if (!SKIP_KEYS.has(k)) walk(v[k], depth + 1);
+  };
+  walk(root, 0);
+  return out;
+}
+
+module.exports = { item, items, ordered, isShort, txt, clean, pickImage, parseCount, parseAge, parseDuration, shortViews, author, fixUrl };
