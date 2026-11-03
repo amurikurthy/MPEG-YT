@@ -355,32 +355,112 @@ export function toast(text) {
 }
 
 /** Infinite scroll: call load() when the sentinel approaches the viewport. */
-export function infinite(container, next, render) {
+/**
+ * Infinite scroll. Loads the next page whenever the end of the list is within
+ * ~1.5 screens - and keeps checking after each page, because a page can add
+ * nothing visible (everything filtered out) and leave the end still in view.
+ * Hung requests time out and retry with backoff; after repeated failures a
+ * "Load more" button replaces the spinner. Duplicate items are dropped.
+ *
+ * opts.initial: items already shown (for de-duplication)
+ * opts.restart: () => Promise<{items, next}> - when the continuation expired
+ *               (server answers 410), start the list over; only new items are added
+ */
+export function infinite(container, next, render, opts = {}) {
   let token = next;
   let busy = false;
-  const sentinel = h('div', { class: 'sentinel' }, h('div', { class: 'spinner small' }));
+  let stopped = false;
+  let failures = 0;
+  let empty = 0;
+  let retryTimer = null;
+  let restarted = false;
+  const seen = new Set();
+  const keyOf = (it) => (it && it.id ? `${it.type || ''}:${it.id}` : null);
+  for (const it of opts.initial || []) if (keyOf(it)) seen.add(keyOf(it));
+  const fresh = (items) => (items || []).filter((it) => {
+    const k = keyOf(it);
+    if (!k) return true;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  const spinner = () => h('div', { class: 'spinner small' });
+  const sentinel = h('div', { class: 'sentinel' }, spinner());
   if (!token) return () => {};
   container.after(sentinel);
-  const io = new IntersectionObserver(async (entries) => {
-    if (!entries.some((e) => e.isIntersecting) || busy || !token) return;
-    busy = true;
-    try {
-      const res = await api.more(token);
-      render(res.items);
-      token = res.next;
-    } catch {
-      token = null;
-    } finally {
-      busy = false;
-      if (!token) {
-        io.disconnect();
-        sentinel.remove();
-      }
-    }
-  }, { rootMargin: '1200px' });
-  io.observe(sentinel);
-  return () => {
+
+  const near = () => {
+    if (!sentinel.isConnected || !sentinel.offsetParent) return false; // removed or hidden view
+    return sentinel.getBoundingClientRect().top < window.innerHeight * 2.5;
+  };
+  const finish = () => {
+    stopped = true;
     io.disconnect();
+    clearTimeout(retryTimer);
+    window.removeEventListener('scroll', onScroll);
     sentinel.remove();
   };
+  const loadMoreButton = () => {
+    sentinel.replaceChildren(h('button', { class: 'pill', type: 'button', onclick: () => {
+      failures = 0;
+      sentinel.replaceChildren(spinner());
+      load();
+    } }, 'Load more'));
+  };
+  const timeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timed out')), ms))]);
+
+  async function load() {
+    if (busy || stopped || !token) return;
+    busy = true;
+    let again = false;
+    try {
+      let res;
+      try {
+        res = await timeout(api.more(token), 10_000);
+      } catch (e) {
+        if (e.status !== 410 || !opts.restart || restarted) throw e;
+        // The server forgot this list (it was open a long time): start it over.
+        restarted = true;
+        res = await timeout(opts.restart(), 10_000);
+      }
+      if (stopped) return;
+      const items = fresh(res.items);
+      if (items.length) render(items);
+      token = res.next;
+      failures = 0;
+      // Pages that add nothing (all filtered or seen): keep going, but not forever.
+      empty = items.length ? 0 : empty + 1;
+      if (empty >= 6) token = null;
+      again = true;
+    } catch (e) {
+      if (stopped) return;
+      failures++;
+      if (e.status === 410 || e.status === 404 || failures >= 3) loadMoreButton();
+      else retryTimer = setTimeout(load, 1000 * 2 ** failures);
+    } finally {
+      busy = false;
+      if (!stopped && !token) finish();
+      // Still near the end (short page, or filtered page): load the next one too.
+      else if (again && near()) setTimeout(load, 0);
+    }
+  }
+
+  const io = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting) && !failures) load();
+  }, { rootMargin: '1500px' });
+  io.observe(sentinel);
+  // Belt and braces: a scroll near the end also loads (observers can miss changes
+  // in layout that don't change the sentinel's own intersection state).
+  let scrollQueued = false;
+  const onScroll = () => {
+    if (scrollQueued || busy || failures || stopped) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      if (near()) load();
+    });
+  };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  return finish;
 }

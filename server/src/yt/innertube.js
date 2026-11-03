@@ -39,7 +39,7 @@ class YouTube {
   constructor(config, account) {
     this.config = config;
     this.account = account;
-    this.pages = new TTLCache({ ttlMs: 30 * 60_000, max: 1000 }); // continuation token -> loader
+    this.pages = new TTLCache({ ttlMs: 3 * 3600_000, max: 2000 }); // continuation token -> loader
     this.reset();
   }
 
@@ -94,8 +94,13 @@ class YouTube {
 
   // ---------- home ----------
 
-  async home(chip) {
+  /** fresh: skip the short-term cache (the client's continuation expired). */
+  async home(chip, fresh = false) {
     const yt = await this.session();
+    if (fresh) {
+      this.cache.delete('home');
+      this.cache.delete(`topic:${chip || 'All'}`);
+    }
     if (this.account.signedIn) {
       try {
         const base = await this.cache.wrap('home', () => yt.getHomeFeed(), 5 * 60_000);

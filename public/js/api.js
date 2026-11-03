@@ -41,6 +41,7 @@ const qs = (o) => Object.entries(o).filter(([, v]) => v != null && v !== '').map
 export const api = {
   session: () => request('/api/session'),
   home: (chip) => get(`/api/home?${qs({ chip })}`),
+  homeFresh: (chip) => request(`/api/home?${qs({ chip, fresh: 1 })}`),
   search: (q, f = {}) => get(`/api/search?${qs({ q, ...f })}`),
   suggest: (q) => get(`/api/suggest?q=${enc(q)}`, { ttl: 30 * 60_000 }),
   video: (id) => get(`/api/video/${enc(id)}`, { ttl: 10 * 60_000 }),

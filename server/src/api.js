@@ -38,7 +38,7 @@ function createApi({ yt, streams, account, sponsor, cfg }) {
           });
         }
         case 'home':
-          return json(res, 200, await yt.home(q.get('chip') || undefined), 'private, max-age=60');
+          return json(res, 200, await yt.home(q.get('chip') || undefined, q.get('fresh') === '1'), q.get('fresh') === '1' ? 'no-store' : 'private, max-age=60');
         case 'search': {
           const query = (q.get('q') || '').trim();
           if (!query) throw new HttpError(400, 'missing q');

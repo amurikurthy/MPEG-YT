@@ -32,7 +32,10 @@ export async function render({ view, isCurrent }) {
     const grid = h('div', { class: 'grid' }, data.items.map((it) => videoCard(it)));
     body.replaceWith(grid);
     body = grid;
-    stop = infinite(grid, data.next, (items) => grid.append(...items.map((it) => videoCard(it))));
+    stop = infinite(grid, data.next, (items) => grid.append(...items.map((it) => videoCard(it))), {
+      initial: data.items,
+      restart: () => api.homeFresh(chip),
+    });
   }
 
   await load(undefined);

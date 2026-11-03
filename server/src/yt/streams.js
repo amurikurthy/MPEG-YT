@@ -247,11 +247,31 @@ class Streams {
    * video and audio, so pressing play starts from local data.
    */
   prefetch(id) {
-    this.info(id).then((info) => {
-      if (!this.cache.enabled) return;
+    // One prefetch at a time: the yt-dlp worker has three slots, and a video the
+    // user actually clicks must never queue behind guesses. Newest guesses first.
+    const known = this.infos.get(id);
+    if (known) return this.warm(id, known); // links known: just make sure the start is on disk
+    if (this.prefetchQueue?.includes(id)) return;
+    this.prefetchQueue = [id, ...(this.prefetchQueue || [])].slice(0, 6);
+    this.runPrefetch();
+  }
+
+  warm(id, info) {
+    if (!this.cache.enabled) return;
+    try {
       const sel = this.select(info);
       for (const f of sel.cacheable) this.cache.warm(SourceCache.key(id, f.format_id), f.url, f.http_headers, WARM_BYTES);
-    }).catch(() => {});
+    } catch { /* nothing playable */ }
+  }
+
+  runPrefetch() {
+    if (this.prefetching || !this.prefetchQueue.length) return;
+    const id = this.prefetchQueue.shift();
+    this.prefetching = true;
+    this.info(id).then((info) => this.warm(id, info)).catch(() => {}).finally(() => {
+      this.prefetching = false;
+      this.runPrefetch();
+    });
   }
 
   /** Pick formats: up to 720p / 30 fps video + best audio, or a muxed fallback. */
