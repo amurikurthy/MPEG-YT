@@ -54,9 +54,12 @@ async function handleStream(ws, params, streams, cfg) {
     start: params.get('t'),
   };
 
+  const t0 = Date.now();
+  let resolvedIn = 0;
   let media;
   try {
     media = await streams.resolve(id);
+    resolvedIn = Date.now() - t0;
   } catch (e) {
     cleanup();
     return fail(e.message);
@@ -101,6 +104,8 @@ async function handleStream(ws, params, streams, cfg) {
     reading = true;
     out.on('data', (chunk) => {
       if (ws.readyState !== ws.OPEN) return;
+      // Start-up time, for diagnosing slow starts: link lookup vs. download + encode.
+      if (!sent) console.log(`[stream] ${id}: first data after ${Date.now() - t0} ms (links ${resolvedIn} ms${retried ? ', after a retry' : ''})`);
       sent += chunk.length;
       ws.send(chunk, { binary: true });
       if (ws.bufferedAmount > WS_HIGH_WATER) updateFlow();

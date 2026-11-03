@@ -24,9 +24,13 @@ const FADE_SAMPLES = 144; // 3 ms
 // Start moving only once a little is buffered, and when the buffer runs dry pause
 // cleanly until a few seconds are buffered again - instead of JSMpeg's default of
 // resuming the instant any data arrives, which stutters on slow networks or servers.
-const PREROLL_SECONDS = 0.75; // first start
-const SEEK_PREROLL_SECONDS = 0.4; // after a seek (sources are usually local by then)
+// Start fast: play as soon as the first frame is up and a sliver of audio is in;
+// the server encodes faster than real time, so the buffer builds while playing.
+const PREROLL_SECONDS = 0.3; // first start
+const SEEK_PREROLL_SECONDS = 0.25; // after a seek (sources are usually local by then)
 const REBUFFER_SECONDS = 3.0;
+const EARLY_REBUFFER_SECONDS = 1.0; // a stall in the first seconds: resume sooner
+const EARLY_SECONDS = 15;
 const MAX_WAIT_MS = 15000; // never wait forever: play what we have
 
 /**
@@ -706,10 +710,11 @@ export class CanvasPlayer {
     // Let the first frame reach the screen (the first composite of a new WebGL canvas
     // can be slow) before scheduling any audio, so that cost can't starve the queue.
     entry.shownTicks = (entry.shownTicks || 0) + 1;
-    if (entry.shownTicks < 3 || this.paused) return;
+    if (entry.shownTicks < 2 || this.paused) return;
     const target = this.hasPlayed ? SEEK_PREROLL_SECONDS : PREROLL_SECONDS;
     if (this.holdBuffered(entry) < target && now() - entry.createdAt < MAX_WAIT_MS) return;
     entry.holding = false;
+    entry.playingSince = now();
     this.hasPlayed = true;
     this.audioOn(entry);
     pl.play();
@@ -919,7 +924,9 @@ export class CanvasPlayer {
     const audioQueued = pl.audio && pl.audio.canPlay && pl.audioOut ? pl.audioOut.enqueuedTime : Infinity;
     if (this.bufferedAhead(entry) < 0.3 || audioQueued < 0.2) {
       this.rebuffers = (this.rebuffers || 0) + 1;
-      this.wait(entry, REBUFFER_SECONDS);
+      // Just started (the buffer is still ramping up): a short wait is enough.
+      const early = entry.playingSince && now() - entry.playingSince < EARLY_SECONDS * 1000;
+      this.wait(entry, early ? EARLY_REBUFFER_SECONDS : REBUFFER_SECONDS);
     }
   }
 

@@ -68,7 +68,7 @@ class YtdlpWorker {
     });
   }
 
-  extract(url, avoid = [], timeoutMs = 90_000) {
+  extract(url, avoid = [], fast = false, timeoutMs = 90_000) {
     return this.ready.then(() => new Promise((resolve, reject) => {
       const id = ++this.seq;
       const timer = setTimeout(() => {
@@ -76,7 +76,7 @@ class YtdlpWorker {
         reject(new Error('yt-dlp timed out'));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.proc.stdin.write(`${JSON.stringify({ id, url, avoid })}\n`);
+      this.proc.stdin.write(`${JSON.stringify({ id, url, avoid, fast })}\n`);
     }));
   }
 
@@ -202,10 +202,31 @@ class Streams {
     return runJson(this.config.bin.ytdlp, [...args, '-J', '--no-playlist', url], { timeoutMs: 90_000 });
   }
 
+  /**
+   * Fast path: yt-dlp's "visionos" client alone, anonymously (it takes no cookies
+   * and needs no JavaScript challenge solving): ~1 s instead of ~3 s. The account
+   * isn't needed for most stream links - feeds, history and likes use it separately.
+   * Not used when YouTube has been refusing those links, or when the user picked
+   * their own clients in YTDLP_EXTRA_ARGS.
+   */
+  async fastInfo(url) {
+    if (!this.worker || this.avoidClients().includes('VISIONOS') || this.config.youtube.extraArgs.some((a) => a.includes('player_client'))) return null;
+    try {
+      const info = await this.worker.extract(url, [], true, 20_000);
+      this.select(info); // throws if nothing playable
+      if (info.live_status === 'is_live') return null; // live: let the full path pick formats
+      return info;
+    } catch {
+      return null; // bot check, age/members restriction, ... -> full path
+    }
+  }
+
   info(id) {
     if (!/^[\w-]{11}$/.test(id)) return Promise.reject(new HttpError(400, 'bad video id'));
     const url = `${YT}/watch?v=${id}`;
     return this.infos.wrap(id, async () => {
+      const fast = await this.fastInfo(url);
+      if (fast) return fast;
       const avoid = this.avoidClients();
       if (!avoid.length) return this.extract(url, []);
       // Without those clients some videos (e.g. age-restricted ones that only play
