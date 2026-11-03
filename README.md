@@ -90,11 +90,23 @@ path `/healthz`.
 
 ## How audio works
 
-ffmpeg loudness-normalizes the audio (EBU R128), encodes it as **MP2** and muxes it into the same MPEG-TS
+ffmpeg loudness-normalizes the audio (EBU R128), encodes it as 48 kHz **MP2** (the native rate of
+YouTube audio and most devices, so nothing is resampled) and muxes it into the same MPEG-TS
 stream as the video. JSMpeg decodes it in WebAssembly and plays it through the **Web Audio API**. The audio
 clock is the master clock: each video frame is shown when the audio reaches its timestamp, which keeps
 lip-sync tight. Browsers block audio until you interact with the page; if that happens, a **Tap to unmute**
 button appears.
+
+Audio is scheduled sample-exactly with about 0.6 s queued, so a busy page (scrolling, images loading)
+doesn't run it dry. Pauses and buffering fade the sound out and back in over a few milliseconds, so they
+never pop.
+
+## Buffering
+
+The server transcodes ahead of playback until about 30 s are buffered, then pauses ffmpeg (no CPU used)
+until the buffer drops. Playback starts once about 1 s is buffered. If the buffer ever runs dry, because of
+a slow server or connection, the player pauses with a spinner until 3 s are buffered and then plays
+smoothly, instead of stuttering.
 
 ## Signing in
 
@@ -123,7 +135,7 @@ happens, the player shows a **Sign in** button. Anyone who can open your MPEG-YT
 | `AUDIO_LOUDNESS` | `-12` | Loudness target in LUFS (other apps: about −14) |
 | `AUDIO_NORMALIZE` | on | `0` plays audio at its original level |
 | `AUDIO_BITRATE` | `192k` | MP2 bitrate |
-| `BUFFER_AHEAD` | `10` | Seconds the player may buffer before ffmpeg is paused |
+| `BUFFER_AHEAD` | `30` | Seconds the player may buffer ahead before ffmpeg is paused |
 | `MAX_STREAMS` | `8` | Concurrent transcodes |
 | `YT_LANG` / `YT_LOCATION` | `en` / `US` | Language and region of YouTube data |
 | `YOUTUBE_MARK_WATCHED` | on | Add what you play to your YouTube history (when signed in) |

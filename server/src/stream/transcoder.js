@@ -68,13 +68,14 @@ function buildArgs(media, p, cfg) {
   if (cfg.stream.ffmpegThreads) args.push('-threads', String(cfg.stream.ffmpegThreads));
 
   if (aIdx >= 0) {
-    // Loudness-normalize so videos play at the level of other apps (EBU R128,
-    // single pass; its ~3s look-ahead costs only ~40ms of startup here because
-    // the transcode runs ahead of playback).
+    // 48 kHz: the native rate of YouTube's audio and of most playback devices, so neither
+    // the server nor the browser resamples. Loudness-normalized so videos play at the
+    // level of other apps (EBU R128, single pass; its ~3 s look-ahead costs only ~40 ms
+    // of startup because the transcode runs ahead of playback).
     const af = cfg.stream.normalizeAudio
-      ? `loudnorm=I=${cfg.stream.loudnessTarget}:TP=-1.5:LRA=11,aresample=44100`
-      : 'aresample=44100';
-    args.push('-af', af, '-c:a', 'mp2', '-b:a', cfg.stream.audioBitrate, '-ar', '44100', '-ac', '2');
+      ? `loudnorm=I=${cfg.stream.loudnessTarget}:TP=-1.5:LRA=11,aresample=48000`
+      : 'aresample=48000';
+    args.push('-af', af, '-c:a', 'mp2', '-b:a', cfg.stream.audioBitrate, '-ar', '48000', '-ac', '2');
   } else {
     args.push('-an');
   }

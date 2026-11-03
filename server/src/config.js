@@ -26,8 +26,8 @@ module.exports = {
      */
     loudnessTarget: num(env.AUDIO_LOUDNESS, -12),
     normalizeAudio: !/^(0|false|no)$/i.test(env.AUDIO_NORMALIZE || ''),
-    /** Seconds the client may buffer before ffmpeg is paused. */
-    bufferAhead: num(env.BUFFER_AHEAD, 10),
+    /** Seconds the client may buffer ahead before ffmpeg is paused (rides out network/CPU hiccups). */
+    bufferAhead: num(env.BUFFER_AHEAD, 30),
     ffmpegThreads: num(env.FFMPEG_THREADS, 0),
     maxConcurrent: num(env.MAX_STREAMS, 8),
   },

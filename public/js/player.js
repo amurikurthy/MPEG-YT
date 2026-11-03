@@ -4,6 +4,142 @@ import { prefs } from './state.js';
 
 const MB = 1024 * 1024;
 const audioCtx = () => JSMpeg.AudioOutput.WebAudio.CachedContext || null;
+
+// ---------- glitch-free audio ----------
+// JSMpeg plays audio as one small Web Audio buffer per MP2 frame (24 ms). Its stock
+// scheduler (a) keeps only 0.25 s queued, so any main-thread hiccup longer than that
+// drains the queue and the next buffer starts abruptly (a pop), (b) accumulates start
+// times in floating point, and (c) jumps the gain on volume changes. Patched below:
+// a deeper queue, sample-exact scheduling, a short fade-in after an underrun, ramped
+// gain changes - plus an AudioContext at the stream's 48 kHz so no per-buffer
+// resampling happens.
+const STREAM_RATE = 48000;
+const AUDIO_LOOKAHEAD = 0.6; // seconds of decoded audio kept queued
+const FADE_SAMPLES = 144; // 3 ms
+
+// ---------- buffering ----------
+// Start moving only once a little is buffered, and when the buffer runs dry pause
+// cleanly until a few seconds are buffered again - instead of JSMpeg's default of
+// resuming the instant any data arrives, which stutters on slow networks or servers.
+const PREROLL_SECONDS = 1.0;
+const REBUFFER_SECONDS = 3.0;
+const MAX_WAIT_MS = 15000; // never wait forever: play what we have
+
+function patchJSMpeg() {
+  const WA = JSMpeg.AudioOutput.WebAudio;
+  if (WA.__mpegyt) return;
+  WA.__mpegyt = true;
+
+  WA.prototype.play = function play(sampleRate, left, right) {
+    if (!this.enabled) return;
+    const n = left.length;
+    if (!this.unlocked) {
+      // Not unlocked yet: advance the wall clock so video keeps time (as upstream does).
+      const ts = JSMpeg.Now();
+      if (this.wallclockStartTime < ts) this.wallclockStartTime = ts;
+      this.wallclockStartTime += n / sampleRate;
+      return;
+    }
+    const ctx = this.context;
+    const now = ctx.currentTime;
+    if (this._vol !== this.volume) {
+      const g = this.gain.gain;
+      g.cancelScheduledValues(now);
+      g.setValueAtTime(g.value, now);
+      g.linearRampToValueAtTime(this.volume, now + 0.03);
+      this._vol = this.volume;
+    }
+    // Schedule on an integer sample counter so consecutive buffers join exactly.
+    let fadeIn = false;
+    if (this._next == null || this._rate !== sampleRate || this._next / sampleRate < now + 0.005) {
+      fadeIn = this._next != null; // underrun: restart gently instead of with a click
+      this._rate = sampleRate;
+      this._next = Math.ceil((now + 0.04) * sampleRate);
+      this.wallclockStartTime = JSMpeg.Now() + 0.04;
+    }
+    const buffer = ctx.createBuffer(2, n, sampleRate);
+    const l = buffer.getChannelData(0);
+    const r = buffer.getChannelData(1);
+    l.set(left);
+    r.set(right);
+    if (fadeIn) {
+      for (let i = 0; i < Math.min(FADE_SAMPLES, n); i++) {
+        const k = i / FADE_SAMPLES;
+        l[i] *= k;
+        r[i] *= k;
+      }
+    }
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(this.destination);
+    src.start(this._next / sampleRate);
+    this._next += n;
+    this.startTime = this._next / sampleRate;
+    this.wallclockStartTime += n / sampleRate;
+  };
+
+  WA.prototype.stop = function stop() {
+    // Ramp instead of cutting the gain to zero (a cut mid-waveform clicks).
+    const g = this.gain.gain;
+    const t = this.context.currentTime;
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(g.value, t);
+    g.linearRampToValueAtTime(0, t + 0.015);
+    this._vol = null;
+  };
+
+  WA.prototype.resetEnqueuedTime = function resetEnqueuedTime() {
+    this.startTime = this.context.currentTime;
+    this.wallclockStartTime = JSMpeg.Now();
+    this._next = null;
+  };
+
+  // Timed playback, as upstream, but keeping AUDIO_LOOKAHEAD of audio queued instead of 0.25 s.
+  JSMpeg.Player.prototype.updateForStaticFile = function updateForStaticFile() {
+    let notEnoughData = false;
+    let headroom = 0;
+    if (this.audio && this.audio.canPlay) {
+      while (!notEnoughData && this.audio.decodedTime - this.audio.currentTime < AUDIO_LOOKAHEAD) {
+        notEnoughData = !this.audio.decode();
+      }
+      if (this.video && this.video.currentTime < this.audio.currentTime) notEnoughData = !this.video.decode();
+      headroom = this.demuxer.currentTime - this.audio.currentTime;
+    } else if (this.video) {
+      const targetTime = (JSMpeg.Now() - this.startTime) + this.video.startTime;
+      const lateTime = targetTime - this.video.currentTime;
+      const frameTime = 1 / this.video.frameRate;
+      if (lateTime > 0) {
+        if (lateTime > frameTime * 2) this.startTime += lateTime;
+        notEnoughData = !this.video.decode();
+      }
+      headroom = this.demuxer.currentTime - targetTime;
+    }
+    this.source.resume(headroom);
+    if (notEnoughData && this.source.completed) {
+      if (this.loop) this.seek(0);
+      else {
+        this.pause();
+        if (this.options.onEnded) this.options.onEnded(this);
+      }
+    } else if (notEnoughData && this.options.onStalled) {
+      this.options.onStalled(this);
+    }
+  };
+}
+
+/** One shared AudioContext at the stream's sample rate, with a playback-sized output buffer. */
+function ensureAudioContext() {
+  const WA = JSMpeg.AudioOutput.WebAudio;
+  if (WA.CachedContext) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  try {
+    WA.CachedContext = new AC({ sampleRate: STREAM_RATE, latencyHint: 'playback' });
+  } catch {
+    try {
+      WA.CachedContext = new AC({ latencyHint: 'playback' });
+    } catch { /* JSMpeg creates its default context */ }
+  }
+}
 const now = () => performance.now();
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 // Fullscreen with WebKit-prefixed fallbacks (older iPadOS Safari).
@@ -264,7 +400,7 @@ export class CanvasPlayer {
     // Autoplay policy: resume audio on the first gesture anywhere.
     this.onGesture = () => {
       const ctx = audioCtx();
-      if (ctx && ctx.state === 'suspended' && !this.paused) ctx.resume();
+      if (ctx && ctx.state === 'suspended' && !this.paused && !this.active?.waitFor) ctx.resume();
       this.unmute.hidden = true;
     };
     document.addEventListener('pointerdown', this.onGesture, true);
@@ -342,6 +478,8 @@ export class CanvasPlayer {
     // Capped at 64MB: tablets (iPad Safari especially) kill tabs with large heaps.
     const videoBufferSize = clamp(Math.ceil((entry.meta.kbps * 1.4 * 1000) / 8 * (ahead + 4)) + 6 * MB, 4 * MB, 64 * MB);
 
+    patchJSMpeg();
+    ensureAudioContext();
     const player = new JSMpeg.Player('ws-managed', {
       canvas,
       source: SocketSource,
@@ -359,6 +497,7 @@ export class CanvasPlayer {
       maxAudioLag: 0.25,
       onVideoDecode: () => this.onFrame(entry),
       onEnded: () => this.onEnded(entry),
+      onStalled: () => this.onStall(entry),
     });
     // Timed playback (A/V sync to the audio clock + headroom reporting) on top of
     // the bounded ring buffers that were allocated for "streaming".
@@ -384,6 +523,7 @@ export class CanvasPlayer {
     this.seekTarget = null;
     this.startupMs = Math.round(now() - this.loadStartedAt);
     if (this.paused) this.freeze(entry);
+    else if (this.bufferedAhead(entry) < PREROLL_SECONDS) this.wait(entry, PREROLL_SECONDS);
     const ctx = audioCtx();
     if (ctx && ctx.state === 'suspended' && !this.paused) this.unmute.hidden = false;
   }
@@ -474,12 +614,110 @@ export class CanvasPlayer {
     if (pl.animationId) cancelAnimationFrame(pl.animationId);
     pl.animationId = null;
     entry.frozenAt = JSMpeg.Now();
+    // JSMpeg's audio clock keeps moving with wall time while frozen; remember where we are.
+    entry.frozenClock = this.mediaClock(entry);
+  }
+
+  /** Current media time of the decoder clock (audio when present, else video). */
+  mediaClock(entry) {
+    const pl = entry.player;
+    if (!pl) return 0;
+    return pl.audio && pl.audio.canPlay ? pl.audio.currentTime : pl.video ? pl.video.currentTime : 0;
+  }
+
+  /** Seconds of media received but not yet played. */
+  bufferedAhead(entry) {
+    const pl = entry.player;
+    if (!pl) return 0;
+    if (entry.source?.completed) return Infinity;
+    const clock = entry.frozenAt ? entry.frozenClock : this.mediaClock(entry);
+    const ahead = pl.demuxer.currentTime - clock;
+    return Number.isFinite(ahead) ? Math.max(0, ahead) : 0;
+  }
+
+  /** Fade the audio out, then suspend the clock (an abrupt stop mid-waveform pops). */
+  audioOff(entry) {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    const out = entry?.player?.audioOut;
+    const t0 = ctx.currentTime;
+    if (out) {
+      const g = out.gain.gain;
+      g.cancelScheduledValues(t0);
+      g.setValueAtTime(g.value, t0);
+      g.linearRampToValueAtTime(0, t0 + 0.012);
+      out._vol = null;
+    }
+    if (entry) {
+      entry.fadeT0 = t0;
+      entry.audioProgressed = 0;
+    }
+    clearTimeout(this.suspendTimer);
+    this.suspendTimer = setTimeout(() => {
+      this.suspendTimer = null;
+      ctx.suspend().then(() => {
+        if (entry) entry.audioProgressed = Math.max(0, ctx.currentTime - entry.fadeT0);
+      });
+    }, 25);
+  }
+
+  /** Resume the clock and fade the audio back in. */
+  audioOn(entry) {
+    const ctx = audioCtx();
+    if (!ctx) return;
+    if (this.suspendTimer) {
+      // Resumed before the suspend happened: the audio never stopped.
+      clearTimeout(this.suspendTimer);
+      this.suspendTimer = null;
+      if (entry && entry.fadeT0 != null) entry.audioProgressed = Math.max(0, ctx.currentTime - entry.fadeT0);
+    }
+    ctx.resume();
+    const out = entry?.player?.audioOut;
+    if (out) {
+      const g = out.gain.gain;
+      const t = ctx.currentTime;
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(0, t);
+      g.linearRampToValueAtTime(out.volume, t + 0.02);
+      out._vol = out.volume;
+    }
+  }
+
+  /** Hold playback (spinner shows) until `seconds` are buffered; tick() releases it. */
+  wait(entry, seconds) {
+    if (entry.waitFor || this.paused) return;
+    this.freeze(entry);
+    this.audioOff(entry);
+    entry.waitFor = seconds;
+    entry.waitSince = now();
+  }
+
+  onStall(entry) {
+    // JSMpeg reports a stall whenever it can't keep its audio queue full; only act once
+    // playback is under way and the buffer is really low.
+    if (entry !== this.active || !entry.started || entry.waitFor || entry.frozenAt || this.paused || this.ended) return;
+    if (this.bufferedAhead(entry) < 0.3) {
+      this.rebuffers = (this.rebuffers || 0) + 1;
+      this.wait(entry, REBUFFER_SECONDS);
+    }
+  }
+
+  checkWait(entry) {
+    if (!entry || !entry.waitFor || this.paused) return;
+    const ready = this.bufferedAhead(entry) >= entry.waitFor || now() - entry.waitSince > MAX_WAIT_MS;
+    if (!ready) return;
+    entry.waitFor = 0;
+    this.audioOn(entry);
+    this.thaw(entry);
   }
 
   thaw(entry) {
     const pl = entry.player;
     if (!pl || !entry.frozenAt) return;
-    const d = JSMpeg.Now() - entry.frozenAt;
+    // Audio that kept playing during the fade-out (or a pause shorter than the fade)
+    // already advanced the clock; don't count it twice.
+    const d = JSMpeg.Now() - entry.frozenAt - (entry.audioProgressed || 0);
+    entry.audioProgressed = 0;
     entry.frozenAt = 0;
     // Shift wall-clock references so the pause doesn't count as elapsed playback.
     pl.startTime += d;
@@ -491,7 +729,7 @@ export class CanvasPlayer {
     if (this.paused) return;
     this.paused = true;
     if (this.active && this.active.started) this.freeze(this.active);
-    audioCtx()?.suspend();
+    this.audioOff(this.active);
     this.playBtn.replaceChildren(icon('play'));
     this.root.classList.remove('idle');
     this.flash('pause');
@@ -501,8 +739,11 @@ export class CanvasPlayer {
     if (this.ended) return this.replay();
     if (!this.paused) return;
     this.paused = false;
-    audioCtx()?.resume();
-    if (this.active) this.thaw(this.active);
+    // If we were buffering, tick() resumes once enough is buffered.
+    if (this.active && !this.active.waitFor) {
+      this.audioOn(this.active);
+      this.thaw(this.active);
+    }
     this.playBtn.replaceChildren(icon('pause'));
     this.flash('play');
   }
@@ -715,7 +956,8 @@ export class CanvasPlayer {
     // Spinner: loading, or playing but no new frame for a while.
     const e = this.active;
     const loading = !!this.pending && !this.pending.failed;
-    const stalled = e && e.started && !this.paused && !this.ended && now() - e.lastFrame > 600;
+    this.checkWait(e);
+    const stalled = e && e.started && !this.paused && !this.ended && (e.waitFor ? now() - e.waitSince > 250 : now() - e.lastFrame > 600);
     const spin = (loading && now() - this.loadStartedAt > 150) || stalled;
     if (this.spinner.hidden === !!spin) this.spinner.hidden = !spin;
 
