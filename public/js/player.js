@@ -14,7 +14,10 @@ const audioCtx = () => JSMpeg.AudioOutput.WebAudio.CachedContext || null;
 // gain changes - plus an AudioContext at the stream's 48 kHz so no per-buffer
 // resampling happens.
 const STREAM_RATE = 48000;
-const AUDIO_LOOKAHEAD = 0.6; // seconds of decoded audio kept queued
+const AUDIO_LOOKAHEAD = 1.0; // seconds of decoded audio kept queued
+const BG_AUDIO_LOOKAHEAD = 3; // in the background, where our ticks may be throttled
+const RESYNC_BEHIND = 4; // video this far behind audio: restart the stream instead of catching up
+const NULL_RENDERER = { render() {}, resize() {} };
 const FADE_SAMPLES = 144; // 3 ms
 
 // ---------- buffering ----------
@@ -26,10 +29,34 @@ const SEEK_PREROLL_SECONDS = 0.4; // after a seek (sources are usually local by 
 const REBUFFER_SECONDS = 3.0;
 const MAX_WAIT_MS = 15000; // never wait forever: play what we have
 
+/**
+ * Smooth audio clock. AudioContext.currentTime only advances once per rendered block
+ * (tens of ms with a playback-sized buffer), so video timed against it would move in
+ * bursts. getOutputTimestamp() pairs the audio time with a precise page time; we
+ * interpolate between the two. It also reflects what is actually leaving the speakers
+ * (output latency included), which keeps lip sync tight.
+ */
+function audioNow(ctx) {
+  const base = ctx.currentTime;
+  if (ctx.state !== 'running' || typeof ctx.getOutputTimestamp !== 'function') return base;
+  const ts = ctx.getOutputTimestamp();
+  if (!ts || !ts.contextTime || !ts.performanceTime) return base;
+  const t = ts.contextTime + (performance.now() - ts.performanceTime) / 1000;
+  // Guard against stale timestamps (e.g. right after a resume).
+  return Math.min(Math.max(t, base - 0.25), base + 0.1);
+}
+
 function patchJSMpeg() {
   const WA = JSMpeg.AudioOutput.WebAudio;
   if (WA.__mpegyt) return;
   WA.__mpegyt = true;
+
+  // JSMpeg probes WebGL support by creating a throwaway context for every player
+  // (every start and seek). Destroying those later stalls the page - up to a second
+  // on slow GPUs - which starved the audio. Probe once.
+  const R = JSMpeg.Renderer.WebGL;
+  const webgl = R.IsSupported();
+  R.IsSupported = () => webgl;
 
   WA.prototype.play = function play(sampleRate, left, right) {
     if (!this.enabled) return;
@@ -53,7 +80,7 @@ function patchJSMpeg() {
     // Schedule on an integer sample counter so consecutive buffers join exactly.
     let fadeIn = false;
     if (this._next == null || this._rate !== sampleRate || this._next / sampleRate < now + 0.005) {
-      fadeIn = this._next != null; // underrun: restart gently instead of with a click
+      fadeIn = true; // first buffer or an underrun: start gently (streams begin mid-waveform)
       this._rate = sampleRate;
       this._next = Math.ceil((now + 0.04) * sampleRate);
       this.wallclockStartTime = JSMpeg.Now() + 0.04;
@@ -72,11 +99,34 @@ function patchJSMpeg() {
     }
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(this.destination);
+    // Tail guard: a gain stage that fades out over the last few ms of whatever is
+    // queued. Each new buffer pushes the fade later, so normally it never happens -
+    // but if the page stalls and the queue really runs dry, the sound fades instead
+    // of being cut mid-waveform (a pop).
+    if (!this.guard) {
+      this.guard = ctx.createGain();
+      this.guard.connect(this.destination);
+    }
+    src.connect(this.guard);
     src.start(this._next / sampleRate);
     this._next += n;
+    const end = this._next / sampleRate;
+    const gg = this.guard.gain;
+    gg.cancelScheduledValues(now);
+    gg.setValueAtTime(1, now);
+    gg.setValueAtTime(1, Math.max(now, end - 0.006));
+    gg.linearRampToValueAtTime(0, end);
     this.startTime = this._next / sampleRate;
     this.wallclockStartTime += n / sampleRate;
+  };
+
+  // How much audio is queued, measured on the audio clock itself (scheduled end minus
+  // the context's current time) rather than JSMpeg's wall-clock estimate. Exact across
+  // suspend/resume, OS audio interruptions and output devices whose clock drifts, so
+  // the decoder never thinks the queue is fuller than it is (which led to underruns).
+  WA.prototype.getEnqueuedTime = function getEnqueuedTime() {
+    if (!this.unlocked || this._next == null) return Math.max(this.wallclockStartTime - JSMpeg.Now(), 0);
+    return Math.max(this._next / this._rate - audioNow(this.context), 0);
   };
 
   WA.prototype.stop = function stop() {
@@ -95,15 +145,43 @@ function patchJSMpeg() {
     this._next = null;
   };
 
-  // Timed playback, as upstream, but keeping AUDIO_LOOKAHEAD of audio queued instead of 0.25 s.
+  // Timed playback as upstream, with three changes:
+  //  - a deeper audio queue (this.audioLookahead, larger in the background);
+  //  - video that falls behind the audio clock catches up by decoding the late frames
+  //    without drawing them, instead of drawing one per frame (a visible fast-forward);
+  //  - with this.renderOff (page in the background) video is decoded in step with the
+  //    audio but not drawn, so it's still in sync when the page comes back.
   JSMpeg.Player.prototype.updateForStaticFile = function updateForStaticFile() {
     let notEnoughData = false;
     let headroom = 0;
     if (this.audio && this.audio.canPlay) {
-      while (!notEnoughData && this.audio.decodedTime - this.audio.currentTime < AUDIO_LOOKAHEAD) {
+      const lookahead = this.audioLookahead || AUDIO_LOOKAHEAD;
+      while (!notEnoughData && this.audio.decodedTime - this.audio.currentTime < lookahead) {
         notEnoughData = !this.audio.decode();
       }
-      if (this.video && this.video.currentTime < this.audio.currentTime) notEnoughData = !this.video.decode();
+      if (this.video && this.video.currentTime < this.audio.currentTime) {
+        const frame = 1 / (this.video.frameRate || 30);
+        const behind = this.audio.currentTime - this.video.currentTime;
+        if (behind > RESYNC_BEHIND && this.options.onDesync) {
+          this.options.onDesync(this, behind);
+        } else {
+          if (this.renderOff || behind > 2 * frame) {
+            const dest = this.video.destination;
+            this.video.destination = NULL_RENDERER;
+            const target = this.renderOff ? 0 : frame; // leave one frame to draw when visible
+            for (let n = 0; n < 150 && this.audio.currentTime - this.video.currentTime > target; n++) {
+              if (!this.video.decode()) {
+                notEnoughData = true;
+                break;
+              }
+            }
+            this.video.destination = dest;
+          }
+          if (!this.renderOff && !notEnoughData && this.video.currentTime < this.audio.currentTime) {
+            notEnoughData = !this.video.decode();
+          }
+        }
+      }
       headroom = this.demuxer.currentTime - this.audio.currentTime;
     } else if (this.video) {
       const targetTime = (JSMpeg.Now() - this.startTime) + this.video.startTime;
@@ -126,6 +204,68 @@ function patchJSMpeg() {
       this.options.onStalled(this);
     }
   };
+}
+
+/**
+ * A ~100 ms tick that keeps running when the page is in the background. Page timers
+ * get throttled there (to once a second, or once a minute), but a dedicated worker's
+ * timers don't, and its messages are delivered promptly.
+ */
+const backgroundTicker = (() => {
+  const subs = new Set();
+  const fire = () => subs.forEach((fn) => fn());
+  try {
+    const src = 'setInterval(() => postMessage(0), 100);';
+    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    worker.onmessage = fire;
+  } catch {
+    setInterval(fire, 100);
+  }
+  return subs;
+})();
+
+// ---------- OS media controls ----------
+// Media Session: title/artwork, play/pause, a seek bar and ±15 s skip buttons in the
+// browser's media hub, keyboard media keys, the lock screen and Control Center.
+// Browsers only offer those controls while a media element is playing, so a silent,
+// looping <audio> element plays alongside the video. It carries no sound - the real
+// audio still goes through Web Audio - and video never uses a media element.
+const SKIP_SECONDS = 15;
+const keepAlive = (() => {
+  try {
+    const rate = 8000;
+    const n = rate * 10; // 10 s (some browsers ignore very short media for their controls)
+    const buf = new ArrayBuffer(44 + n);
+    const v = new DataView(buf);
+    const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); v.setUint32(4, 36 + n, true); str(8, 'WAVE');
+    str(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+    str(36, 'data'); v.setUint32(40, n, true);
+    new Uint8Array(buf, 44).fill(128); // 8-bit silence
+    const a = new Audio(URL.createObjectURL(new Blob([buf], { type: 'audio/wav' })));
+    a.loop = true;
+    a.preload = 'auto';
+    return a;
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * Canvas pool. Each canvas owns a WebGL context; creating and tearing those down on
+ * every seek is slow (and context teardown blocks the page). Players borrow a canvas
+ * and give it back, so seeks and the next video reuse existing contexts.
+ */
+const canvasPool = [];
+function takeCanvas() {
+  const c = canvasPool.pop() || h('canvas');
+  c.className = 'pending';
+  return c;
+}
+function returnCanvas(c) {
+  c.remove();
+  if (canvasPool.length < 3) canvasPool.push(c);
 }
 
 /** One shared AudioContext at the stream's sample rate, with a playback-sized output buffer. */
@@ -260,6 +400,7 @@ export class CanvasPlayer {
 
     this.buildDom(mount);
     this.bindEvents();
+    this.setupMediaSession();
     this.load(this.seekTarget);
     this.raf = requestAnimationFrame(this.tick);
   }
@@ -403,21 +544,45 @@ export class CanvasPlayer {
       const ctx = audioCtx();
       if (ctx && ctx.state === 'suspended' && !this.paused && !this.active?.waitFor) ctx.resume();
       this.unmute.hidden = true;
+      this.keepAliveTried = 0; // a gesture lets the media element start
+      this.updateMediaSession(true);
     };
     document.addEventListener('pointerdown', this.onGesture, true);
     document.addEventListener('keydown', this.onGesture, true);
 
-    // Pause cleanly when the tab is hidden; resume when shown.
-    this.onVisibility = () => {
-      if (document.hidden && !this.paused) {
-        this.hiddenPause = true;
-        this.pause();
-      } else if (!document.hidden && this.hiddenPause) {
-        this.hiddenPause = false;
-        this.play();
-      }
-    };
-    document.addEventListener('visibilitychange', this.onVisibility);
+    // Keep playing in the background (minimized window, other tab, other app). Browsers
+    // stop requestAnimationFrame there, which is what normally drives JSMpeg, so a
+    // worker-based ticker takes over decoding until frames resume.
+    this.onBackgroundTick = () => this.backgroundTick();
+    backgroundTicker.add(this.onBackgroundTick);
+    // iOS/iPadOS: treat this as media playback (plays with the silent switch on).
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'playback';
+    } catch { /* unsupported */ }
+  }
+
+  /** Runs every ~100 ms; does the work of the animation-frame loop while that's stopped. */
+  backgroundTick() {
+    if (this.destroyed || now() - (this.lastRaf || 0) < 250) return; // frames are running
+    this.updateMediaSession();
+    this.checkHold(this.pending);
+    const e = this.active;
+    if (!e) return;
+    this.checkWait(e);
+    this.checkHold(e);
+    const pl = e.player;
+    if (!pl || !e.started || e.holding || e.frozenAt || this.paused || this.ended) return;
+    pl.audioLookahead = BG_AUDIO_LOOKAHEAD;
+    pl.renderOff = true;
+    try {
+      pl.updateForStaticFile();
+    } finally {
+      pl.renderOff = false;
+    }
+    if (this.o.onProgress && now() - (this.lastReport || 0) > 3000) {
+      this.lastReport = now();
+      this.o.onProgress(this.position, this.duration);
+    }
   }
 
   // ---------- stream lifecycle ----------
@@ -469,7 +634,7 @@ export class CanvasPlayer {
   }
 
   createPlayer(entry) {
-    const canvas = h('canvas', { class: 'pending' });
+    const canvas = takeCanvas();
     this.stage.append(canvas);
     entry.canvas = canvas;
 
@@ -499,13 +664,54 @@ export class CanvasPlayer {
       onVideoDecode: () => this.onFrame(entry),
       onEnded: () => this.onEnded(entry),
       onStalled: () => this.onStall(entry),
+      // Video far behind audio (e.g. the browser froze the page for a while): restart
+      // the stream at the current position - instant from the source cache.
+      onDesync: () => {
+        if (entry !== this.active || entry.resyncing) return;
+        entry.resyncing = true;
+        this.load(this.position);
+      },
     });
     // Timed playback (A/V sync to the audio clock + headroom reporting) on top of
     // the bounded ring buffers that were allocated for "streaming".
     player.options.streaming = false;
+    // Hold: nothing plays (no audio is scheduled) until the pre-roll is buffered;
+    // checkHold() shows the first frame meanwhile and then starts playback cleanly.
+    player.autoplay = false;
+    if (!player.paused) player.pause();
+    entry.holding = true;
+    entry.createdAt = now();
     entry.player = player;
     entry.source = player.source;
     this.applyVolume(player);
+  }
+
+  /** Seconds received beyond the first video frame (while holding). */
+  holdBuffered(entry) {
+    const pl = entry.player;
+    if (entry.source?.completed) return Infinity;
+    const base = pl.video && entry.started ? pl.video.currentTime : null;
+    return base == null ? 0 : Math.max(0, pl.demuxer.currentTime - base);
+  }
+
+  /** Called every tick: first frame as soon as possible, playback once pre-roll is in. */
+  checkHold(entry) {
+    if (!entry || !entry.holding || !entry.player || entry.disposed) return;
+    const pl = entry.player;
+    if (!entry.started) {
+      if (pl.source.established && pl.video) pl.video.decode(); // draws frame 1 -> onFrame
+      return;
+    }
+    // Let the first frame reach the screen (the first composite of a new WebGL canvas
+    // can be slow) before scheduling any audio, so that cost can't starve the queue.
+    entry.shownTicks = (entry.shownTicks || 0) + 1;
+    if (entry.shownTicks < 3 || this.paused) return;
+    const target = this.hasPlayed ? SEEK_PREROLL_SECONDS : PREROLL_SECONDS;
+    if (this.holdBuffered(entry) < target && now() - entry.createdAt < MAX_WAIT_MS) return;
+    entry.holding = false;
+    this.hasPlayed = true;
+    this.audioOn(entry);
+    pl.play();
   }
 
   onControl(entry, m) {
@@ -523,12 +729,6 @@ export class CanvasPlayer {
     if (old && old !== entry) this.dispose(old);
     this.seekTarget = null;
     this.startupMs = Math.round(now() - this.loadStartedAt);
-    if (this.paused) this.freeze(entry);
-    else {
-      const preroll = this.hasPlayed ? SEEK_PREROLL_SECONDS : PREROLL_SECONDS;
-      if (this.bufferedAhead(entry) < preroll) this.wait(entry, preroll);
-    }
-    this.hasPlayed = true;
     const ctx = audioCtx();
     if (ctx && ctx.state === 'suspended' && !this.paused) this.unmute.hidden = false;
   }
@@ -540,6 +740,7 @@ export class CanvasPlayer {
     this.paused = true;
     this.root.classList.remove('idle');
     this.playBtn.replaceChildren(icon('replay'));
+    this.updateMediaSession(true);
     this.o.onEnded && this.o.onEnded(this);
   }
 
@@ -568,7 +769,7 @@ export class CanvasPlayer {
         entry.ws.close();
       } catch { /* ignore */ }
     }
-    entry.canvas && entry.canvas.remove();
+    if (entry.canvas) returnCanvas(entry.canvas);
     if (this.active === entry) this.active = null;
     if (this.pending === entry) this.pending = null;
   }
@@ -737,24 +938,26 @@ export class CanvasPlayer {
   pause() {
     if (this.paused) return;
     this.paused = true;
-    if (this.active && this.active.started) this.freeze(this.active);
+    if (this.active && this.active.started && !this.active.holding) this.freeze(this.active);
     this.audioOff(this.active);
     this.playBtn.replaceChildren(icon('play'));
     this.root.classList.remove('idle');
     this.flash('pause');
+    this.updateMediaSession(true);
   }
 
   play() {
     if (this.ended) return this.replay();
     if (!this.paused) return;
     this.paused = false;
-    // If we were buffering, tick() resumes once enough is buffered.
-    if (this.active && !this.active.waitFor) {
+    // If we were buffering (or holding for pre-roll), tick() starts us once enough is buffered.
+    if (this.active && !this.active.waitFor && !this.active.holding) {
       this.audioOn(this.active);
       this.thaw(this.active);
     }
     this.playBtn.replaceChildren(icon('pause'));
     this.flash('play');
+    this.updateMediaSession(true);
   }
 
   toggle() {
@@ -818,6 +1021,65 @@ export class CanvasPlayer {
   setDetail(detail) {
     this.detail = detail;
     if (!this.duration && detail.duration) this.duration = detail.duration;
+    this.updateMediaSession(true);
+  }
+
+  // ---------- OS media controls ----------
+
+  setupMediaSession() {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const set = (action, fn) => {
+      try {
+        ms.setActionHandler(action, fn);
+      } catch { /* action not supported here */ }
+    };
+    set('play', () => this.play());
+    set('pause', () => this.pause());
+    set('stop', () => this.pause());
+    set('seekbackward', (d) => this.seekBy(-(d?.seekOffset || SKIP_SECONDS)));
+    set('seekforward', (d) => this.seekBy(d?.seekOffset || SKIP_SECONDS));
+    // Many mini players and keyboards only show previous/next: make them skip ±15 s too.
+    set('previoustrack', () => this.seekBy(-SKIP_SECONDS));
+    set('nexttrack', () => this.seekBy(SKIP_SECONDS));
+    set('seekto', (d) => Number.isFinite(d?.seekTime) && this.seekTo(d.seekTime));
+    this.msActions = ['play', 'pause', 'stop', 'seekbackward', 'seekforward', 'previoustrack', 'nexttrack', 'seekto'];
+  }
+
+  /** Keep metadata, play state, position and the keep-alive element in step (cheap; runs every tick). */
+  updateMediaSession(force = false) {
+    if (this.destroyed) return;
+    const playing = !this.paused && !this.ended;
+    if (keepAlive) {
+      if (playing && keepAlive.paused && now() - (this.keepAliveTried || 0) > 2000) {
+        this.keepAliveTried = now();
+        keepAlive.play().catch(() => {}); // may need a user gesture first; retried
+      } else if (!playing && !keepAlive.paused) keepAlive.pause();
+    }
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const state = playing ? 'playing' : 'paused';
+    if (ms.playbackState !== state) ms.playbackState = state;
+    const d = this.detail;
+    if (d && this.msMetaFor !== d.id && window.MediaMetadata) {
+      ms.metadata = new MediaMetadata({
+        title: d.title,
+        artist: d.channel?.name || '',
+        album: 'MPEG-YT',
+        artwork: [
+          { src: `https://i.ytimg.com/vi/${d.id}/mqdefault.jpg`, sizes: '320x180', type: 'image/jpeg' },
+          { src: `https://i.ytimg.com/vi/${d.id}/hqdefault.jpg`, sizes: '480x360', type: 'image/jpeg' },
+          { src: `https://i.ytimg.com/vi/${d.id}/maxresdefault.jpg`, sizes: '1280x720', type: 'image/jpeg' },
+        ],
+      });
+      this.msMetaFor = d.id;
+    }
+    if (this.duration && !this.live && ms.setPositionState && (force || now() - (this.msPosAt || 0) > 1000)) {
+      this.msPosAt = now();
+      try {
+        ms.setPositionState({ duration: this.duration, playbackRate: 1, position: clamp(this.position, 0, this.duration) });
+      } catch { /* position briefly out of range during a seek */ }
+    }
   }
 
   setTheater(on) {
@@ -952,6 +1214,10 @@ export class CanvasPlayer {
   tick = () => {
     if (this.destroyed) return;
     this.raf = requestAnimationFrame(this.tick);
+    this.lastRaf = now();
+    this.updateMediaSession();
+    // Back in the foreground: return to the normal audio queue depth.
+    if (this.active?.player) this.active.player.audioLookahead = AUDIO_LOOKAHEAD;
     const pos = this.position;
     const d = this.duration;
 
@@ -966,7 +1232,9 @@ export class CanvasPlayer {
     const e = this.active;
     const loading = !!this.pending && !this.pending.failed;
     this.checkWait(e);
-    const stalled = e && e.started && !this.paused && !this.ended && (e.waitFor ? now() - e.waitSince > 250 : now() - e.lastFrame > 600);
+    this.checkHold(this.pending || e);
+    if (this.pending !== e) this.checkHold(e);
+    const stalled = e && e.started && !this.paused && !this.ended && (e.holding ? now() - e.createdAt > 400 : e.waitFor ? now() - e.waitSince > 250 : now() - e.lastFrame > 600);
     const spin = (loading && now() - this.loadStartedAt > 150) || stalled;
     if (this.spinner.hidden === !!spin) this.spinner.hidden = !spin;
 
@@ -1019,7 +1287,18 @@ export class CanvasPlayer {
     document.removeEventListener('webkitfullscreenchange', this.onFsChange);
     document.removeEventListener('pointerdown', this.onGesture, true);
     document.removeEventListener('keydown', this.onGesture, true);
-    document.removeEventListener('visibilitychange', this.onVisibility);
+    backgroundTicker.delete(this.onBackgroundTick);
+    keepAlive?.pause();
+    const ms = navigator.mediaSession;
+    if (ms) {
+      for (const a of this.msActions || []) {
+        try {
+          ms.setActionHandler(a, null);
+        } catch { /* ignore */ }
+      }
+      ms.metadata = null;
+      ms.playbackState = 'none';
+    }
     if (fsElement() === this.root) exitFs();
     this.root.remove();
   }

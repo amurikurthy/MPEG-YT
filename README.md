@@ -97,9 +97,27 @@ clock is the master clock: each video frame is shown when the audio reaches its 
 lip-sync tight. Browsers block audio until you interact with the page; if that happens, a **Tap to unmute**
 button appears.
 
-Audio is scheduled sample-exactly with about 0.6 s queued, so a busy page (scrolling, images loading)
+Audio is scheduled sample-exactly with about 1 s queued (3 s in the background), so a busy page (scrolling, images loading)
 doesn't run it dry. Pauses and buffering fade the sound out and back in over a few milliseconds, so they
 never pop.
+
+## Background playback and media controls
+
+- **Keeps playing in the background:** minimize the window, switch tabs or switch apps and the audio continues.
+  - **How:** a small worker keeps decoding while the browser has stopped drawing the page. Video is decoded
+    in step with the audio but not drawn, so it's still in sync when you come back, with no fast-forward.
+  - **If you're gone a long time:** if the browser froze the page and video ends up more than 4 s behind,
+    the stream restarts at the right position instead.
+  - **iPadOS:** it can still pause web audio when you switch apps; playback then resumes in sync when you
+    return.
+- **Mini players and media keys:**
+  - **Controls:** title, channel and artwork, play/pause and a seek bar, through the Media Session API. They
+    work from the browser's media hub, keyboard media keys, and the lock screen or Control Center.
+  - **Skip buttons:** back and forward rewind or skip **15 s**. The previous/next-track buttons (all some
+    mini players show) do the same.
+  - **Silent audio element:** browsers only show these controls while a media element plays, so a silent,
+    looping `<audio>` element runs alongside the video. It makes no sound; the real audio still goes through
+    Web Audio.
 
 ## Fast starts and seeking
 
