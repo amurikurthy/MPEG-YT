@@ -68,7 +68,7 @@ class YtdlpWorker {
     });
   }
 
-  extract(url, timeoutMs = 90_000) {
+  extract(url, avoid = [], timeoutMs = 90_000) {
     return this.ready.then(() => new Promise((resolve, reject) => {
       const id = ++this.seq;
       const timer = setTimeout(() => {
@@ -76,7 +76,7 @@ class YtdlpWorker {
         reject(new Error('yt-dlp timed out'));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.proc.stdin.write(`${JSON.stringify({ id, url })}\n`);
+      this.proc.stdin.write(`${JSON.stringify({ id, url, avoid })}\n`);
     }));
   }
 
@@ -100,6 +100,9 @@ class Streams {
     this.infos = new TTLCache({ ttlMs: 3 * 3600_000, max: 300 });
     this.watched = new TTLCache({ ttlMs: 6 * 3600_000, max: 2000 });
     this.cache = new SourceCache(config);
+    // YouTube clients whose links YouTube has been refusing (403), by the c= name in the link.
+    this.refused = new Map(); // client name -> until (ms)
+    this.cache.onRefused = (url) => this.noteRefused(url);
     this.worker = null;
   }
 
@@ -164,12 +167,58 @@ class Streams {
     this.infos.delete(id);
   }
 
+  /** YouTube refused a link: avoid the client that issued it for a while. */
+  noteRefused(url) {
+    let c = null;
+    try {
+      c = new URL(url).searchParams.get('c');
+    } catch { /* not a URL */ }
+    if (!c || !/^[A-Z0-9_]{2,40}$/.test(c)) return;
+    if (!this.refused.has(c)) console.warn(`[streams] YouTube is refusing ${c} links; using other clients for a while`);
+    this.refused.set(c, Date.now() + 6 * 3600_000);
+  }
+
+  /**
+   * Clients to avoid. Signed in, yt-dlp asks the embedded-player client first,
+   * and YouTube often refuses its links to servers - so skip it from the start.
+   */
+  avoidClients() {
+    const now = Date.now();
+    const out = new Set(this.account.signedIn ? ['WEB_EMBEDDED_PLAYER'] : []);
+    for (const [c, until] of this.refused) {
+      if (until > now) out.add(c);
+      else this.refused.delete(c);
+    }
+    return [...out];
+  }
+
+  extract(url, avoid) {
+    if (this.worker) return this.worker.extract(url, avoid);
+    const args = [...this.baseArgs()];
+    const keys = avoid.map((c) => CLIENT_KEYS[c]).filter(Boolean).flat();
+    if (keys.length && !args.some((a) => a.includes('player_client'))) {
+      args.push('--extractor-args', `youtube:player_client=${['default', ...keys.map((k) => `-${k}`)].join(',')}`);
+    }
+    return runJson(this.config.bin.ytdlp, [...args, '-J', '--no-playlist', url], { timeoutMs: 90_000 });
+  }
+
   info(id) {
     if (!/^[\w-]{11}$/.test(id)) return Promise.reject(new HttpError(400, 'bad video id'));
     const url = `${YT}/watch?v=${id}`;
-    return this.infos.wrap(id, () => (this.worker
-      ? this.worker.extract(url)
-      : runJson(this.config.bin.ytdlp, [...this.baseArgs(), '-J', '--no-playlist', url], { timeoutMs: 90_000 })));
+    return this.infos.wrap(id, async () => {
+      const avoid = this.avoidClients();
+      if (!avoid.length) return this.extract(url, []);
+      // Without those clients some videos (e.g. age-restricted ones that only play
+      // embedded) have nothing playable: then let yt-dlp choose as usual.
+      try {
+        const info = await this.extract(url, avoid);
+        this.select(info);
+        return info;
+      } catch (e) {
+        if (/private|members|removed|unavailable|not available/i.test(e.message)) throw e;
+        return this.extract(url, []);
+      }
+    });
   }
 
   /**
@@ -186,9 +235,28 @@ class Streams {
 
   /** Pick formats: up to 720p / 30 fps video + best audio, or a muxed fallback. */
   select(info) {
+    const all = (info.formats || []).filter((f) => f.url);
+    // Formats from clients YouTube has been refusing, only as a last resort.
+    const avoid = new Set(this.avoidClients());
+    const clientOf = (f) => {
+      try {
+        return new URL(f.url).searchParams.get('c');
+      } catch {
+        return null;
+      }
+    };
+    const preferred = avoid.size ? all.filter((f) => !avoid.has(clientOf(f))) : all;
+    if (preferred.length < all.length) {
+      try {
+        return this.selectFrom(preferred, info);
+      } catch { /* fall through to everything */ }
+    }
+    return this.selectFrom(all, info);
+  }
+
+  selectFrom(fmts, info) {
     const { maxHeight, maxFps } = this.config.stream;
     const live = info.live_status === 'is_live';
-    const fmts = (info.formats || []).filter((f) => f.url);
     const isHttp = (f) => f.protocol === 'https' || f.protocol === 'http';
     const codecRank = (f) => {
       const i = VCODEC_PREF.findIndex((c) => (f.vcodec || '').startsWith(c));
@@ -289,5 +357,20 @@ class Streams {
       { timeoutMs: 120_000 }).catch((e) => console.warn(`[streams] mark-watched ${id}: ${e.message}`));
   }
 }
+
+/** InnerTube client names (c= in links) -> yt-dlp client keys, for the CLI fallback. */
+const CLIENT_KEYS = {
+  WEB_EMBEDDED_PLAYER: ['web_embedded'],
+  WEB: ['web', 'web_safari'],
+  MWEB: ['mweb'],
+  TVHTML5: ['tv', 'tv_downgraded', 'tv_samsung'],
+  TVHTML5_SIMPLY: ['tv_simply'],
+  ANDROID: ['android'],
+  ANDROID_VR: ['android_vr'],
+  IOS: ['ios'],
+  VISIONOS: ['visionos'],
+  WEB_CREATOR: ['web_creator'],
+  WEB_REMIX: ['web_music'],
+};
 
 module.exports = { Streams };

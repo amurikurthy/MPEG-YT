@@ -4,11 +4,15 @@ Starting yt-dlp for every video costs ~2 s (Python start-up, imports, re-reading
 YouTube's player code). This process stays loaded and answers requests over
 stdin/stdout, one JSON object per line:
 
-  -> {"id": 1, "url": "https://www.youtube.com/watch?v=..."}
+  -> {"id": 1, "url": "https://www.youtube.com/watch?v=...", "avoid": ["WEB_EMBEDDED_PLAYER"]}
   <- {"id": 1, "ok": true, "info": {...}}   or   {"id": 1, "ok": false, "error": "..."}
 
 argv[1] is a JSON list of yt-dlp command-line options (the same ones the CLI
 would get), parsed with yt-dlp's own parser so behaviour matches the CLI.
+
+"avoid" lists YouTube client names (the c= parameter of stream links) whose
+links YouTube has been refusing; the yt-dlp clients behind them are excluded
+for that request (player_client=default,-<client>...).
 """
 import json
 import sys
@@ -29,17 +33,38 @@ cookie_lock = threading.Lock()
 local = threading.local()
 
 
-def options():
-    _parser, _opts, _urls, ydl_opts = yt_dlp.parse_options(ARGS)
+def client_keys(names):
+    """yt-dlp client keys for InnerTube client names, e.g. WEB_EMBEDDED_PLAYER -> web_embedded."""
+    try:
+        from yt_dlp.extractor.youtube._base import INNERTUBE_CLIENTS
+    except Exception:  # noqa: BLE001 - layout differs between versions
+        return []
+    wanted = set(names)
+    return sorted(k for k, v in INNERTUBE_CLIENTS.items()
+                  if not k.startswith('_') and v.get('INNERTUBE_CONTEXT', {}).get('client', {}).get('clientName') in wanted)
+
+
+def options(avoid):
+    args = list(ARGS)
+    # The user's own player_client choice (YTDLP_EXTRA_ARGS) wins.
+    if avoid and not any('player_client' in a for a in args):
+        keys = client_keys(avoid)
+        if keys:
+            args += ['--extractor-args', 'youtube:player_client=' + ','.join(['default'] + ['-' + k for k in keys])]
+    _parser, _opts, _urls, ydl_opts = yt_dlp.parse_options(args)
     ydl_opts.update(quiet=True, no_warnings=True, noprogress=True, skip_download=True, noplaylist=True)
     return ydl_opts
 
 
-def ydl():
-    # YoutubeDL instances aren't thread-safe; keep one per worker thread.
-    if getattr(local, 'ydl', None) is None:
-        local.ydl = yt_dlp.YoutubeDL(options())
-    return local.ydl
+def ydl(avoid):
+    # YoutubeDL instances aren't thread-safe; keep one per worker thread (and client set).
+    key = tuple(sorted(avoid))
+    cache = getattr(local, 'ydls', None)
+    if cache is None:
+        cache = local.ydls = {}
+    if key not in cache:
+        cache[key] = yt_dlp.YoutubeDL(options(key))
+    return cache[key]
 
 
 def reply(obj):
@@ -51,7 +76,7 @@ def reply(obj):
 
 def handle(msg):
     try:
-        y = ydl()
+        y = ydl([str(a) for a in msg.get('avoid') or []][:8])
         info = y.extract_info(msg['url'], download=False)
         out = {k: info.get(k) for k in INFO_FIELDS}
         out['formats'] = [{k: f.get(k) for k in FORMAT_FIELDS} for f in info.get('formats') or []]

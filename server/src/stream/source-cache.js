@@ -262,10 +262,11 @@ class Entry {
         const buf = Buffer.allocUnsafe(to - from + 1);
         await this.fd.read(buf, 0, buf.length, from);
         this.lastUsed = Date.now();
-        if (!res.write(buf)) await new Promise((r) => res.once('drain', r).once('close', r));
+        if (!res.write(buf)) await drained(res);
       }
       res.end();
     } catch (e) {
+      if (e.status === 403 && this.cache.onRefused) this.cache.onRefused(this.url);
       // Pass YouTube's refusal through so ffmpeg (and the viewer) see why.
       if (!res.headersSent) res.writeHead(e.status || 502, { 'Content-Length': 0 }).end();
       else res.destroy();
@@ -383,6 +384,19 @@ class SourceCache {
     this.closed = true;
     this.server?.close();
   }
+}
+
+/** Wait until a response can take more data (or is gone), without piling up listeners. */
+function drained(res) {
+  return new Promise((resolve) => {
+    const done = () => {
+      res.off('drain', done);
+      res.off('close', done);
+      resolve();
+    };
+    res.on('drain', done);
+    res.on('close', done);
+  });
 }
 
 module.exports = { SourceCache, CHUNK };
