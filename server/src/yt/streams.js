@@ -1,15 +1,96 @@
 'use strict';
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
 const { TTLCache } = require('../util/cache');
 const { run, runJson } = require('../util/exec');
 const { HttpError } = require('./account');
+const { SourceCache } = require('../stream/source-cache');
 
 const YT = 'https://www.youtube.com';
 const VCODEC_PREF = ['avc1', 'vp09', 'vp9', 'av01']; // cheapest to decode first
+const WARM_BYTES = 1024 * 1024; // prefetch: first ~1 MB of video and audio
+
+/**
+ * Keeps yt-dlp loaded in one Python process (see ytdlp_worker.py) instead of
+ * starting it per video - roughly halves the time to resolve a video.
+ */
+class YtdlpWorker {
+  constructor(python, args) {
+    this.python = python;
+    this.args = args;
+    this.pending = new Map();
+    this.seq = 0;
+    this.start();
+  }
+
+  start() {
+    const script = path.join(__dirname, 'ytdlp_worker.py');
+    this.proc = spawn(this.python, [script, JSON.stringify(this.args)], { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.ready = new Promise((resolve, reject) => {
+      this.onReady = resolve;
+      this.proc.once('error', reject);
+      setTimeout(() => reject(new Error('yt-dlp worker did not start')), 20_000).unref();
+    });
+    let buf = '';
+    this.proc.stdout.on('data', (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i);
+        buf = buf.slice(i + 1);
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg.ready) {
+          this.onReady(msg.version);
+          continue;
+        }
+        const p = this.pending.get(msg.id);
+        if (!p) continue;
+        this.pending.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.ok) p.resolve(msg.info);
+        else p.reject(new Error(`yt-dlp failed: ${msg.error}`));
+      }
+    });
+    this.proc.stderr.on('data', () => {}); // errors come back per request
+    this.proc.on('exit', () => {
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error('yt-dlp worker exited'));
+      }
+      this.pending.clear();
+      if (!this.stopped) setTimeout(() => this.start(), 1000);
+    });
+  }
+
+  extract(url, timeoutMs = 90_000) {
+    return this.ready.then(() => new Promise((resolve, reject) => {
+      const id = ++this.seq;
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error('yt-dlp timed out'));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      this.proc.stdin.write(`${JSON.stringify({ id, url })}\n`);
+    }));
+  }
+
+  stop() {
+    this.stopped = true;
+    this.proc.kill();
+  }
+}
 
 /**
  * Resolves playable stream URLs with yt-dlp (it keeps up with YouTube's signature
  * and anti-bot changes far better than anything hand-rolled). Only formats up to
- * 720p / 30 fps are considered - that's all the MPEG-1 output needs.
+ * 720p / 30 fps are considered - that's all the MPEG-1 output needs. Sources go
+ * through the local source cache, so seeks and re-watches read from disk.
  */
 class Streams {
   constructor(config, account) {
@@ -18,37 +99,88 @@ class Streams {
     // Stream URLs expire after ~6h; keep well under that.
     this.infos = new TTLCache({ ttlMs: 3 * 3600_000, max: 300 });
     this.watched = new TTLCache({ ttlMs: 6 * 3600_000, max: 2000 });
+    this.cache = new SourceCache(config);
+    this.worker = null;
   }
 
   async init() {
+    await this.cache.init().catch((e) => {
+      this.cache.enabled = false;
+      console.warn(`[cache] disabled: ${e.message}`);
+    });
     const v = (await run(this.config.bin.ytdlp, ['--version'], { timeoutMs: 15_000 })).trim();
     console.log(`[streams] yt-dlp ${v}`);
+    this.python = await this.findPython();
+    this.startWorker();
+  }
+
+  /** The Python that has yt-dlp installed (the venv next to the yt-dlp binary in the image). */
+  async findPython() {
+    const candidates = [process.env.YTDLP_PYTHON];
+    try {
+      const bin = (await run('sh', ['-c', `command -v ${this.config.bin.ytdlp}`], { timeoutMs: 5000 })).trim();
+      const dir = path.dirname(fs.realpathSync(bin));
+      candidates.push(path.join(dir, 'python3'), path.join(dir, 'python'));
+    } catch { /* not on PATH */ }
+    candidates.push('python3');
+    for (const py of candidates.filter(Boolean)) {
+      try {
+        await run(py, ['-c', 'import yt_dlp'], { timeoutMs: 15_000 });
+        return py;
+      } catch { /* try next */ }
+    }
+    return null;
+  }
+
+  startWorker() {
+    this.worker?.stop();
+    this.worker = null;
+    if (!this.python) {
+      console.warn('[streams] yt-dlp Python module not found; using the yt-dlp command (slower)');
+      return;
+    }
+    this.worker = new YtdlpWorker(this.python, this.baseArgs());
+    this.worker.ready.then(() => console.log('[streams] yt-dlp worker ready')).catch((e) => {
+      console.warn(`[streams] yt-dlp worker failed (${e.message}); using the yt-dlp command`);
+      this.worker?.stop();
+      this.worker = null;
+    });
   }
 
   baseArgs() {
-    const a = ['--ignore-config', '--no-warnings', '--js-runtimes', 'node'];
+    const a = ['--ignore-config', '--no-warnings', '--js-runtimes', 'node', '--cache-dir', path.join(this.config.cacheDir, 'yt-dlp')];
     if (this.account.signedIn) a.push('--cookies', this.account.cookiesFile);
     return [...a, ...this.config.youtube.extraArgs];
   }
 
+  /** Sign-in changed: new cookies for everything. */
   reset() {
     this.infos = new TTLCache({ ttlMs: 3 * 3600_000, max: 300 });
+    if (this.python) this.startWorker();
   }
 
   info(id) {
     if (!/^[\w-]{11}$/.test(id)) return Promise.reject(new HttpError(400, 'bad video id'));
-    return this.infos.wrap(id, () =>
-      runJson(this.config.bin.ytdlp, [...this.baseArgs(), '-J', '--no-playlist', `${YT}/watch?v=${id}`], { timeoutMs: 90_000 }));
+    const url = `${YT}/watch?v=${id}`;
+    return this.infos.wrap(id, () => (this.worker
+      ? this.worker.extract(url)
+      : runJson(this.config.bin.ytdlp, [...this.baseArgs(), '-J', '--no-playlist', url], { timeoutMs: 90_000 })));
   }
 
-  /** Warm the cache (hover prefetch). */
+  /**
+   * Hover / Up-next prefetch: resolve the stream and download the first ~1 MB of
+   * video and audio, so pressing play starts from local data.
+   */
   prefetch(id) {
-    this.info(id).catch(() => {});
+    this.info(id).then((info) => {
+      if (!this.cache.enabled) return;
+      const sel = this.select(info);
+      for (const f of sel.cacheable) this.cache.warm(SourceCache.key(id, f.format_id), f.url, f.http_headers, WARM_BYTES);
+    }).catch(() => {});
   }
 
-  async resolve(id) {
-    const info = await this.info(id);
-    this.markWatched(id);
+  /** Pick formats: up to 720p / 30 fps video + best audio, or a muxed fallback. */
+  select(info) {
     const { maxHeight, maxFps } = this.config.stream;
     const live = info.live_status === 'is_live';
     const fmts = (info.formats || []).filter((f) => f.url);
@@ -73,31 +205,51 @@ class Streams {
       // Prefer the original-language track over dubs.
       const a = audio.find((f) => /original/i.test(f.format_note || '') || (f.language_preference ?? 0) >= 10)
         || audio.find((f) => (f.language_preference ?? 0) >= 0) || audio[0];
-      if (v && a) {
-        return {
-          inputs: [
-            { url: v.url, headers: v.http_headers, hasVideo: true, hasAudio: false },
-            { url: a.url, headers: a.http_headers, hasVideo: false, hasAudio: true },
-          ],
-          duration: info.duration,
-          fps: v.fps,
-          sourceHeight: v.height,
-          seekable: true,
-        };
-      }
+      if (v && a) return { live, video: v, audio: a, cacheable: [v, a] };
     }
-
     // Muxed fallback (live HLS, or videos without separate streams).
     const muxed = fmts.filter((f) => f.vcodec !== 'none' && f.acodec !== 'none');
     const m = muxed.filter(fits).sort(rank)[0] || muxed.sort(rank).pop();
     if (!m) throw new HttpError(422, 'no playable format found');
+    return { live, muxed: m, cacheable: !live && isHttp(m) ? [m] : [] };
+  }
+
+  async resolve(id) {
+    const info = await this.info(id);
+    this.markWatched(id);
+    const sel = this.select(info);
+    // ffmpeg opens its inputs one after another; fetch the start of every source in
+    // parallel right now so neither waits on the network when ffmpeg gets to it.
+    if (this.cache.enabled) {
+      for (const f of sel.cacheable) this.cache.warm(SourceCache.key(id, f.format_id), f.url, f.http_headers, WARM_BYTES);
+    }
+    const input = (f, hasVideo, hasAudio) => {
+      const cached = this.cache.enabled && sel.cacheable.includes(f);
+      return {
+        // Local URL through the source cache, or YouTube directly (live streams).
+        url: cached ? this.cache.register(SourceCache.key(id, f.format_id), f.url, f.http_headers) : f.url,
+        headers: cached ? undefined : f.http_headers,
+        local: cached,
+        hasVideo,
+        hasAudio,
+      };
+    };
+    if (sel.video) {
+      return {
+        inputs: [input(sel.video, true, false), input(sel.audio, false, true)],
+        duration: info.duration,
+        fps: sel.video.fps,
+        sourceHeight: sel.video.height,
+        seekable: true,
+      };
+    }
     return {
-      inputs: [{ url: m.url, headers: m.http_headers, hasVideo: true, hasAudio: true }],
-      duration: live ? undefined : info.duration,
-      fps: m.fps,
-      sourceHeight: m.height,
-      seekable: !live,
-      live,
+      inputs: [input(sel.muxed, true, true)],
+      duration: sel.live ? undefined : info.duration,
+      fps: sel.muxed.fps,
+      sourceHeight: sel.muxed.height,
+      seekable: !sel.live,
+      live: sel.live,
     };
   }
 

@@ -37,7 +37,10 @@ function buildArgs(media, p, cfg) {
 
   for (const inp of media.inputs) {
     if (p.start > 0 && media.seekable) args.push('-ss', p.start.toFixed(3));
-    if (/^https?:\/\//.test(inp.url)) {
+    if (inp.local) {
+      // Served by the local source cache: fast, reliable, no headers needed.
+      args.push('-multiple_requests', '1');
+    } else if (/^https?:\/\//.test(inp.url)) {
       args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_on_network_error', '1', '-reconnect_delay_max', '5');
       const headers = { ...(inp.headers || {}) };
       const ua = headers['User-Agent'] || headers['user-agent'];

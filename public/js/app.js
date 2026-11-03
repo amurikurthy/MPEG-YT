@@ -1,4 +1,4 @@
-import { api } from './api.js';
+import { api, resetPrefetchBudget } from './api.js';
 import { h, icon, avatar, popover, closeMenus, errorBox, toast, href } from './ui.js';
 import { prefs } from './state.js';
 import { openSignIn } from './account.js';
@@ -78,6 +78,7 @@ async function route(isPop = false) {
   closeMenus();
   closeDrawer();
   const [page, render] = match();
+  resetPrefetchBudget();
   document.body.dataset.page = page;
   renderGuide();
   syncSearchBox();

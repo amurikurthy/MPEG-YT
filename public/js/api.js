@@ -68,11 +68,48 @@ export const api = {
   },
 };
 
-/** Hover-prefetch: video details (instant watch page) + server-side stream resolution. */
+/**
+ * Prefetch a video: its details (instant watch page) and, on the server, stream
+ * resolution plus the first ~1 MB of video/audio (playback starts from local data).
+ */
 const prefetched = new Set();
 export function prefetch(id) {
   if (!id || prefetched.has(id)) return;
   prefetched.add(id);
   api.video(id).catch(() => prefetched.delete(id));
   fetch(`/api/prefetch/${enc(id)}`, { credentials: 'same-origin' }).catch(() => {});
+}
+
+/**
+ * Touch screens have no hover: prefetch a few cards that stay on screen for a
+ * moment. Budgeted per page so scrolling a long feed doesn't hammer YouTube.
+ */
+const VISIBLE_BUDGET = 4;
+let budget = VISIBLE_BUDGET;
+const timers = new WeakMap();
+const io = typeof IntersectionObserver !== 'undefined' && matchMedia('(pointer: coarse)').matches
+  ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting && e.intersectionRatio >= 0.6) {
+        timers.set(e.target, setTimeout(() => {
+          io.unobserve(e.target);
+          if (budget > 0 && !prefetched.has(e.target.dataset.prefetch)) {
+            budget -= 1;
+            prefetch(e.target.dataset.prefetch);
+          }
+        }, 1000));
+      } else clearTimeout(timers.get(e.target));
+    }
+  }, { threshold: [0, 0.6] })
+  : null;
+
+export function prefetchWhenVisible(el, id) {
+  if (!io) return;
+  el.dataset.prefetch = id;
+  io.observe(el);
+}
+
+/** New page: fresh budget. */
+export function resetPrefetchBudget() {
+  budget = VISIBLE_BUDGET;
 }

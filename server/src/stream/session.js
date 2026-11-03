@@ -138,6 +138,9 @@ function explain(raw) {
   if (/age.?restricted|confirm your age|inappropriate for some users/i.test(msg)) {
     return { code: 'signin', message: 'This video is age-restricted. Sign in with an account that can watch it.' };
   }
+  if (/\b403\b|forbidden/i.test(msg)) {
+    return { code: 'signin', message: 'YouTube refused to send this video to the server. Signing in usually fixes this.' };
+  }
   if (/members.?only|join this channel/i.test(msg)) return { code: 'unavailable', message: 'This video is for channel members only.' };
   if (/private video/i.test(msg)) return { code: 'unavailable', message: 'This video is private.' };
   if (/not available in your country|geo.?restrict/i.test(msg)) return { code: 'unavailable', message: 'This video isn’t available in your server’s country.' };

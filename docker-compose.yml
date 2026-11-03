@@ -14,6 +14,7 @@ services:
       # VIDEO_BITRATE_KBPS: "3500" # MPEG-1 at 720p/30
       # AUDIO_LOUDNESS: "-12"      # LUFS; other apps play around -14
       # MAX_STREAMS: "4"           # concurrent transcodes
+      # SOURCE_CACHE_MB: "2048"    # disk for cached source video (fast seeks/re-watches)
       # AUTH_TOKEN: change-me      # recommended if reachable beyond your LAN; open /?token=change-me once
       # YOUTUBE_MARK_WATCHED: "0"  # don't add what you play to your YouTube history
       # PUID: "1000"               # owner of the files in ./config (default 1000:1000)

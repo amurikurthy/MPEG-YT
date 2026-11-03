@@ -1,4 +1,4 @@
-import { api, prefetch } from './api.js';
+import { api, prefetch, prefetchWhenVisible } from './api.js';
 import { history } from './state.js';
 
 /** Tiny DOM builder. Text children are always inserted as text (no HTML injection). */
@@ -148,6 +148,7 @@ function warm(el, id) {
   el.addEventListener('pointerenter', () => { t = setTimeout(() => prefetch(id), 150); });
   el.addEventListener('pointerleave', () => clearTimeout(t));
   el.addEventListener('pointerdown', (e) => { if (e.pointerType !== 'mouse') prefetch(id); }, { passive: true });
+  prefetchWhenVisible(el, id);
 }
 
 // ---------- cards ----------

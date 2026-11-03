@@ -21,7 +21,8 @@ const FADE_SAMPLES = 144; // 3 ms
 // Start moving only once a little is buffered, and when the buffer runs dry pause
 // cleanly until a few seconds are buffered again - instead of JSMpeg's default of
 // resuming the instant any data arrives, which stutters on slow networks or servers.
-const PREROLL_SECONDS = 1.0;
+const PREROLL_SECONDS = 0.75; // first start
+const SEEK_PREROLL_SECONDS = 0.4; // after a seek (sources are usually local by then)
 const REBUFFER_SECONDS = 3.0;
 const MAX_WAIT_MS = 15000; // never wait forever: play what we have
 
@@ -523,7 +524,11 @@ export class CanvasPlayer {
     this.seekTarget = null;
     this.startupMs = Math.round(now() - this.loadStartedAt);
     if (this.paused) this.freeze(entry);
-    else if (this.bufferedAhead(entry) < PREROLL_SECONDS) this.wait(entry, PREROLL_SECONDS);
+    else {
+      const preroll = this.hasPlayed ? SEEK_PREROLL_SECONDS : PREROLL_SECONDS;
+      if (this.bufferedAhead(entry) < preroll) this.wait(entry, preroll);
+    }
+    this.hasPlayed = true;
     const ctx = audioCtx();
     if (ctx && ctx.state === 'suspended' && !this.paused) this.unmute.hidden = false;
   }
@@ -696,7 +701,11 @@ export class CanvasPlayer {
     // JSMpeg reports a stall whenever it can't keep its audio queue full; only act once
     // playback is under way and the buffer is really low.
     if (entry !== this.active || !entry.started || entry.waitFor || entry.frozenAt || this.paused || this.ended) return;
-    if (this.bufferedAhead(entry) < 0.3) {
+    // Video packets run ahead of audio in the stream, so also watch the audio queue
+    // itself: pause (with a fade) before it runs dry rather than cutting mid-waveform.
+    const pl = entry.player;
+    const audioQueued = pl.audio && pl.audio.canPlay && pl.audioOut ? pl.audioOut.enqueuedTime : Infinity;
+    if (this.bufferedAhead(entry) < 0.3 || audioQueued < 0.2) {
       this.rebuffers = (this.rebuffers || 0) + 1;
       this.wait(entry, REBUFFER_SECONDS);
     }

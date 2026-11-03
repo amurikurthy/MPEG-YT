@@ -101,6 +101,20 @@ Audio is scheduled sample-exactly with about 0.6 s queued, so a busy page (scrol
 doesn't run it dry. Pauses and buffering fade the sound out and back in over a few milliseconds, so they
 never pop.
 
+## Fast starts and seeking
+
+- **yt-dlp stays loaded:** one long-running worker keeps it in memory with its caches warm, instead of
+  starting it per video. That roughly halves the time to resolve a video; a repeat resolve takes about 16 ms.
+- **Source cache:** ffmpeg reads YouTube's video and audio through a local proxy. The proxy downloads them
+  in 512 KB chunks over persistent connections, keeps a copy on disk (`/cache/sources`, up to
+  `SOURCE_CACHE_MB`), and keeps downloading the rest while you watch. Seeks into downloaded parts never touch
+  the network, so they take about 0.3 s instead of about 2 s. Re-watching is fast too.
+- **Prefetch:**
+  - **Desktop:** hovering a video resolves it and downloads its first ~1 MB of video and audio.
+  - **Tablets:** cards that stay on screen for a second get the same treatment, up to 4 per page.
+  - **Watch page:** while you watch, the next video in Up Next or the playlist is prepared too.
+  - **Result:** a prefetched video starts in about 1 s.
+
 ## Buffering
 
 The server transcodes ahead of playback until about 30 s are buffered, then pauses ffmpeg (no CPU used)
@@ -136,6 +150,7 @@ happens, the player shows a **Sign in** button. Anyone who can open your MPEG-YT
 | `AUDIO_NORMALIZE` | on | `0` plays audio at its original level |
 | `AUDIO_BITRATE` | `192k` | MP2 bitrate |
 | `BUFFER_AHEAD` | `30` | Seconds the player may buffer ahead before ffmpeg is paused |
+| `SOURCE_CACHE_MB` | `2048` | Disk space for cached source video/audio (fast seeks and re-watches); `0` disables |
 | `MAX_STREAMS` | `8` | Concurrent transcodes |
 | `YT_LANG` / `YT_LOCATION` | `en` / `US` | Language and region of YouTube data |
 | `YOUTUBE_MARK_WATCHED` | on | Add what you play to your YouTube history (when signed in) |
@@ -153,7 +168,9 @@ server/src/
   api.js                    REST API (/api/home, /search, /video, /comments, /channel, /feed, /playlist, ...)
   yt/innertube.js           YouTube data via InnerTube (youtubei.js): feeds, search, watch page, actions
   yt/normalize.js           YouTube's item shapes -> small JSON for the UI
-  yt/streams.js             stream URLs via yt-dlp (<= 720p / 30 fps formats)
+  yt/streams.js             stream URLs via yt-dlp (<= 720p / 30 fps formats), prefetch
+  yt/ytdlp_worker.py        persistent yt-dlp process (no per-video start-up cost)
+  stream/source-cache.js    local proxy + on-disk cache of YouTube sources (fast seeks)
   yt/account.js             saved session, sign-in, cookies.txt upload
   stream/transcoder.js      ffmpeg: MPEG-1 720p/30, loudness-normalized MP2
   stream/session.js         one WebSocket = one ffmpeg; flow control; friendly errors

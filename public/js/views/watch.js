@@ -1,4 +1,4 @@
-import { api } from '../api.js';
+import { api, prefetch } from '../api.js';
 import {
   h, icon, avatar, fmt, href, compactCard, channelName, skeletonList, errorBox, infinite, act, share, popover, toast,
 } from '../ui.js';
@@ -120,7 +120,7 @@ export async function render({ view, params, app, isCurrent }) {
     }
   }, { rootMargin: '600px' });
 
-  const cleanup = () => {
+  let cleanup = () => {
     clearInterval(countdown);
     document.removeEventListener('keydown', onKey);
     window.removeEventListener('resize', relocate);
@@ -154,6 +154,16 @@ export async function render({ view, params, app, isCurrent }) {
   renderInfo(info, detail, app, (t) => player.seekTo(t));
 
   upNext = detail.related || [];
+  // Warm whatever plays next, so autoplay / Next starts instantly.
+  const warmNext = setTimeout(() => {
+    const n = nextVideo();
+    if (n && isCurrent()) prefetch(n.item.id);
+  }, 6000);
+  const prevCleanup = cleanup;
+  cleanup = () => {
+    clearTimeout(warmNext);
+    prevCleanup();
+  };
   const list = h('div', { class: 'list compact' }, upNext.map(compactCard));
   related.replaceChildren(list);
   stopRelated = infinite(list, detail.relatedNext, (items) => {

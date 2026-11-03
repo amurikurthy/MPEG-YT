@@ -28,6 +28,8 @@ module.exports = {
     normalizeAudio: !/^(0|false|no)$/i.test(env.AUDIO_NORMALIZE || ''),
     /** Seconds the client may buffer ahead before ffmpeg is paused (rides out network/CPU hiccups). */
     bufferAhead: num(env.BUFFER_AHEAD, 30),
+    /** Disk space for cached source video/audio (instant seeks and re-watches). 0 disables. */
+    sourceCacheMb: num(env.SOURCE_CACHE_MB, 2048),
     ffmpegThreads: num(env.FFMPEG_THREADS, 0),
     maxConcurrent: num(env.MAX_STREAMS, 8),
   },
