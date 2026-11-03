@@ -45,6 +45,7 @@ export const api = {
   search: (q, f = {}) => get(`/api/search?${qs({ q, ...f })}`),
   suggest: (q) => get(`/api/suggest?q=${enc(q)}`, { ttl: 30 * 60_000 }),
   video: (id) => get(`/api/video/${enc(id)}`, { ttl: 10 * 60_000 }),
+  storyboard: (id) => get(`/api/storyboard/${enc(id)}`, { ttl: 60 * 60_000 }),
   comments: (id, sort) => get(`/api/comments/${enc(id)}?${qs({ sort })}`, { ttl: 60_000 }),
   channel: (id, sort) => get(`/api/channel/${enc(id)}?${qs({ sort })}`),
   feed: (name) => get(`/api/feed/${enc(name)}`, { ttl: 60_000 }),

@@ -14,6 +14,7 @@ const { HttpError } = require('./yt/account');
  *   GET  /api/playlist/<id>
  *   GET  /api/more/<token>                next page of any list above
  *   GET  /api/prefetch/<id>               warm stream resolution (hover)
+ *   GET  /api/storyboard/<id>             seek-bar preview sprite sheets
  *   POST /api/action  {type, id}          like/dislike/unrate/subscribe/unsubscribe/watchlater/unwatchlater
  *   GET/POST /api/account/...             sign-in (see accountRoute)
  * POSTs must carry X-MPEG-YT: 1 - a custom header forces a CORS preflight, so other
@@ -56,6 +57,8 @@ function createApi({ yt, streams, account, sponsor, cfg }) {
         }
         case 'video':
           return json(res, 200, await yt.video(need(arg)), 'private, max-age=60');
+        case 'storyboard':
+          return json(res, 200, { storyboard: await streams.storyboard(need(arg)) }, 'private, max-age=3600');
         case 'sponsor':
           return json(res, 200, { segments: await sponsor.segments(need(arg)) }, 'private, max-age=3600');
         case 'comments':

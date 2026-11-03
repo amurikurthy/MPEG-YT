@@ -539,6 +539,9 @@ a.channel-name:hover { color: var(--text); }
 .knob { position: absolute; top: 50%; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border-radius: 50%; background: var(--red); transform: scale(0); transition: transform 0.1s; }
 .seek:hover .knob, .seek.dragging .knob { transform: scale(1); }
 .tip { position: absolute; bottom: 24px; transform: translateX(-50%); padding: 2px 8px; border-radius: 4px; background: rgba(28, 28, 28, 0.9); font-size: 13px; font-weight: 500; pointer-events: none; }
+.tip:has(.tip-thumb:not([hidden])) { padding: 0; background: none; display: flex; flex-direction: column; align-items: center; gap: 6px; text-shadow: 0 0 4px rgba(0, 0, 0, 0.9); }
+/* Storyboard thumbnail, scaled up a little (YouTube's are 160x90). */
+.tip-thumb { width: calc(var(--sbw, 160px) * 1.25); height: calc(var(--sbh, 90px) * 1.25); border: 2px solid #fff; border-radius: 8px; background-color: #000; background-repeat: no-repeat; box-shadow: 0 2px 12px rgba(0, 0, 0, 0.6); }
 
 /* touch */
 .ripple { position: absolute; top: 0; bottom: 0; width: 40%; display: grid; place-items: center; background: rgba(255, 255, 255, 0.12); color: #fff; pointer-events: none; z-index: 3; }

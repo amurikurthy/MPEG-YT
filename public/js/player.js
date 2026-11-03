@@ -1,5 +1,6 @@
 /* global JSMpeg */
 import { h, icon, fmt } from './ui.js';
+import { api } from './api.js';
 import { prefs } from './state.js';
 
 const MB = 1024 * 1024;
@@ -423,7 +424,10 @@ export class CanvasPlayer {
     this.seekBuf = h('div', { class: 'buf' });
     this.seekProg = h('div', { class: 'prog' });
     this.seekKnob = h('div', { class: 'knob' });
-    this.seekTip = h('div', { class: 'tip', hidden: true });
+    // Hover/drag preview: storyboard thumbnail (when the video has one) + time.
+    this.tipThumb = h('div', { class: 'tip-thumb', hidden: true });
+    this.tipTime = h('span', { class: 'tip-time' });
+    this.seekTip = h('div', { class: 'tip', hidden: true }, this.tipThumb, this.tipTime);
     this.seek = h('div', { class: 'seek', role: 'slider', tabindex: '-1', 'aria-label': 'Seek' },
       h('div', { class: 'track' }, this.seekCached, this.seekBuf, this.seekProg), this.seekKnob, this.seekTip);
 
@@ -514,9 +518,7 @@ export class CanvasPlayer {
     this.seek.addEventListener('pointermove', (e) => {
       if (!this.duration) return;
       const f = frac(e);
-      this.seekTip.hidden = false;
-      this.seekTip.textContent = fmt.time(f * this.duration);
-      this.seekTip.style.left = `${f * 100}%`;
+      this.showTip(f * this.duration);
       if (dragging) this.drawProgress(f * this.duration);
     });
     this.seek.addEventListener('pointerleave', () => { if (!dragging) this.seekTip.hidden = true; });
@@ -526,9 +528,7 @@ export class CanvasPlayer {
       this.dragPos = frac(e) * this.duration;
       this.seek.setPointerCapture(e.pointerId);
       this.seek.classList.add('dragging');
-      this.seekTip.hidden = false;
-      this.seekTip.textContent = fmt.time(this.dragPos);
-      this.seekTip.style.left = `${(this.dragPos / this.duration) * 100}%`;
+      this.showTip(this.dragPos);
       this.drawProgress(this.dragPos);
     });
     this.seek.addEventListener('pointermove', (e) => { if (dragging) this.dragPos = frac(e) * this.duration; });
@@ -736,6 +736,7 @@ export class CanvasPlayer {
     if (old && old !== entry) this.dispose(old);
     this.seekTarget = null;
     this.startupMs = Math.round(now() - this.loadStartedAt);
+    this.loadStoryboard();
     const ctx = audioCtx();
     if (ctx && ctx.state === 'suspended' && !this.paused) this.unmute.hidden = false;
   }
@@ -805,6 +806,56 @@ export class CanvasPlayer {
 
   hideError() {
     this.errorEl.hidden = true;
+  }
+
+  /** Seek-bar previews (YouTube's storyboard sprite sheets); fetched once per video. */
+  loadStoryboard() {
+    if (this.storyboardRequested || this.live) return;
+    this.storyboardRequested = true;
+    api.storyboard(this.id).then((r) => {
+      const sb = r && r.storyboard;
+      if (!sb || this.destroyed) return;
+      this.storyboard = sb;
+      this.sheetCache = new Map();
+    }).catch(() => {});
+  }
+
+  /** Preload a sprite sheet (and its neighbour) so the preview appears without a gap. */
+  sheet(i) {
+    const sb = this.storyboard;
+    for (const k of [i, i + 1]) {
+      if (k < 0 || k >= sb.sheets.length || this.sheetCache.has(k)) continue;
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = sb.sheets[k];
+      this.sheetCache.set(k, img);
+    }
+    return sb.sheets[i];
+  }
+
+  /** Show the hover/drag tip at time t: thumbnail (if any) and time, kept inside the bar. */
+  showTip(t) {
+    const sb = this.storyboard;
+    this.tipTime.textContent = fmt.time(t);
+    if (sb) {
+      const perSheet = sb.columns * sb.rows;
+      const n = Math.min(Math.floor(t / sb.interval), sb.sheets.length * perSheet - 1);
+      const i = Math.floor(n / perSheet);
+      const cell = n % perSheet;
+      const th = this.tipThumb;
+      th.style.setProperty('--sbw', `${sb.width}px`);
+      th.style.setProperty('--sbh', `${sb.height}px`);
+      th.style.backgroundImage = `url("${this.sheet(i)}")`;
+      th.style.backgroundSize = `${sb.columns * 100}% ${sb.rows * 100}%`;
+      th.style.backgroundPosition = `${sb.columns > 1 ? ((cell % sb.columns) / (sb.columns - 1)) * 100 : 0}% ${sb.rows > 1 ? (Math.floor(cell / sb.columns) / (sb.rows - 1)) * 100 : 0}%`;
+      th.hidden = false;
+    }
+    this.seekTip.hidden = false;
+    // Keep the whole tip inside the seek bar.
+    const w = this.seek.clientWidth;
+    const half = (this.seekTip.offsetWidth || 0) / 2;
+    const x = clamp((t / this.duration) * w, half, Math.max(half, w - half));
+    this.seekTip.style.left = `${x}px`;
   }
 
   applyMeta(m) {

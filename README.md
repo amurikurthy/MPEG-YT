@@ -121,6 +121,10 @@ never pop.
 
 ## Fast starts and seeking
 
+- **Scrub previews:** hovering over or dragging the seek bar shows a thumbnail of that moment, from
+  YouTube's storyboard (the sprite sheets YouTube's own player uses). They come with the stream lookup,
+  so they cost the server nothing extra; the images load straight from `i.ytimg.com`.
+
 - **yt-dlp stays loaded:** one long-running worker keeps it in memory with its caches warm, instead of
   starting it per video. That roughly halves the time to resolve a video; a repeat resolve takes about 16 ms.
 - **Source cache:** ffmpeg reads YouTube's video and audio through a local proxy. The proxy downloads them

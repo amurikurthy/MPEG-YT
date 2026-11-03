@@ -274,6 +274,22 @@ class Streams {
     });
   }
 
+  /**
+   * Seek-bar previews: YouTube's storyboard (sprite sheets of small thumbnails).
+   * Comes with the stream lookup, so it's free once the video is playing.
+   */
+  async storyboard(id) {
+    const info = await this.info(id);
+    const boards = (info.formats || []).filter((f) => f.format_note === 'storyboard' && f.sheets && f.sheets.length && f.columns && f.rows && f.width);
+    // The sharpest level up to 320 px wide (usually 160x90).
+    const b = boards.filter((f) => f.width <= 320).sort((x, y) => y.width - x.width)[0];
+    if (!b || !info.duration) return null;
+    const perSheet = b.columns * b.rows;
+    // Seconds per thumbnail: from the board's rate, else spread evenly over the video.
+    const interval = b.fps > 0 ? 1 / b.fps : info.duration / (b.sheets.length * perSheet);
+    return { width: b.width, height: b.height, columns: b.columns, rows: b.rows, interval, duration: info.duration, sheets: b.sheets };
+  }
+
   /** Pick formats: up to 720p / 30 fps video + best audio, or a muxed fallback. */
   select(info) {
     const all = (info.formats || []).filter((f) => f.url);

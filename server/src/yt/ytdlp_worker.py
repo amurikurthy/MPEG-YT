@@ -29,6 +29,7 @@ ARGS = json.loads(sys.argv[1])
 FORMAT_FIELDS = (
     'format_id', 'url', 'protocol', 'vcodec', 'acodec', 'height', 'width', 'fps', 'tbr', 'abr',
     'asr', 'http_headers', 'format_note', 'language_preference', 'filesize', 'filesize_approx', 'ext',
+    'rows', 'columns',
 )
 INFO_FIELDS = ('id', 'title', 'duration', 'live_status', 'is_live')
 
@@ -94,13 +95,21 @@ def reply(obj):
         sys.stdout.flush()
 
 
+def fmt(f):
+    d = {k: f.get(k) for k in FORMAT_FIELDS}
+    if f.get('format_note') == 'storyboard':
+        # Seek-bar previews: the sprite sheets (one URL each).
+        d['sheets'] = [x.get('url') for x in (f.get('fragments') or [])[:300] if x.get('url')]
+    return d
+
+
 def handle(msg):
     try:
         fast = bool(msg.get('fast'))
         y = ydl([str(a) for a in msg.get('avoid') or []][:8], fast)
         info = y.extract_info(msg['url'], download=False)
         out = {k: info.get(k) for k in INFO_FIELDS}
-        out['formats'] = [{k: f.get(k) for k in FORMAT_FIELDS} for f in info.get('formats') or []]
+        out['formats'] = [fmt(f) for f in info.get('formats') or []]
         if y.params.get('cookiefile') and not fast:
             # YouTube rotates cookies; persist them like the CLI does on exit.
             with cookie_lock:
