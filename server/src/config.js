@@ -53,6 +53,15 @@ module.exports = {
     height: num(env.LOGIN_HEIGHT, 768),
     display: num(env.LOGIN_DISPLAY, 87),
     idleTimeoutMs: num(env.LOGIN_IDLE_TIMEOUT, 300) * 1000,
+    /** Extra Chromium flags, e.g. --proxy-server=http://proxy:3128 */
+    extraArgs: list(env.LOGIN_BROWSER_ARGS, []),
+  },
+
+  /** Skip sponsor reads etc. inside videos using SponsorBlock. SPONSORBLOCK=0 disables. */
+  sponsorblock: {
+    enabled: !/^(0|false|no)$/i.test(env.SPONSORBLOCK || ''),
+    categories: list(env.SPONSORBLOCK_CATEGORIES, ['sponsor', 'selfpromo']),
+    api: env.SPONSORBLOCK_API || 'https://sponsor.ajay.app',
   },
 
   youtube: {

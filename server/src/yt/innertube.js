@@ -107,7 +107,8 @@ class YouTube {
         console.warn(`[yt] home feed: ${e.message}`);
       }
     }
-    return { ...(await this.topicFeed(yt, chip)), chips: TOPICS.map((t) => t[0]), chip: chip || 'All', personalized: false };
+    const feed = await this.cache.wrap(`topic:${chip || 'All'}`, () => this.topicFeed(yt, chip), 5 * 60_000);
+    return { ...feed, chips: TOPICS.map((t) => t[0]), chip: chip || 'All', personalized: false };
   }
 
   async topicFeed(yt, chip) {

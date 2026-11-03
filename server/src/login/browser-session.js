@@ -3,14 +3,23 @@ const fs = require('fs');
 const fsp = fs.promises;
 const { spawn } = require('child_process');
 const { run } = require('../util/exec');
+const path = require('path');
+const crypto = require('crypto');
+const { WebSocketServer } = require('ws');
+const { readerScript } = require('./page-reader');
 
 /**
  * A short-lived, server-side browser used only for signing in to a platform.
  *
- * Chromium runs on a private virtual X display; ffmpeg captures that display as
- * MPEG-1 (JSMpeg's low-latency live mode) and the client sends taps/keys back,
- * which are injected with xdotool. Once the user has signed in, the account module
- * extracts the session cookies from the profile and the browser is torn down.
+ * Chromium runs on a private virtual X display and is driven over the DevTools
+ * protocol (a private pipe): the current sign-in step is read into a plain
+ * description (see page-reader.js) that the app shows as a native form, and what
+ * the user enters is typed/clicked into the real page as trusted input events.
+ *
+ * Fallback for steps a form can't express: ffmpeg captures the display as MPEG-1
+ * (JSMpeg's low-latency live mode) and the client sends taps/keys back, injected
+ * with xdotool. Once the user has signed in, the account module extracts the
+ * session cookies from the profile and the browser is torn down.
  *
  * The browser exists only for the few minutes the sign-in takes.
  */
@@ -46,16 +55,37 @@ class BrowserLoginSession {
     this.state = 'starting';
     this.error = null;
     const bin = this.o.config.bin;
-    const env = { ...process.env, DISPLAY: this.display };
+    // Chromium needs writable HOME/XDG folders (and dies without a window if it has
+    // none); keep them next to the throwaway profile instead of trusting $HOME.
+    const home = `${this.o.profileDir}-home`;
+    const env = {
+      ...process.env,
+      DISPLAY: this.display,
+      HOME: home,
+      XDG_CONFIG_HOME: `${home}/.config`,
+      XDG_CACHE_HOME: `${home}/.cache`,
+      XDG_RUNTIME_DIR: `${home}/.run`,
+    };
 
     try {
       await fsp.mkdir(this.o.profileDir, { recursive: true });
+      for (const d of [env.XDG_CONFIG_HOME, env.XDG_CACHE_HOME, env.XDG_RUNTIME_DIR]) await fsp.mkdir(d, { recursive: true, mode: 0o700 });
+      // No "Save password?" bubbles or sign-in-to-Chrome prompts over the page.
+      await fsp.mkdir(`${this.o.profileDir}/Default`, { recursive: true });
+      await fsp.writeFile(`${this.o.profileDir}/Default/Preferences`, JSON.stringify({
+        credentials_enable_service: false,
+        credentials_enable_autosignin: false,
+        profile: { password_manager_enabled: false },
+        signin: { allowed: false },
+        autofill: { profile_enabled: false, credit_card_enabled: false },
+      }));
       // Stale lock from a crashed run would stop Chromium from starting.
       await fsp.rm(`${this.o.profileDir}/SingletonLock`, { force: true });
       await fsp.rm(`/tmp/.X${this.display.slice(1)}-lock`, { force: true });
 
       this.procs.xvfb = spawn(bin.xvfb, [this.display, '-screen', '0', `${this.width}x${this.height}x24`, '-nolisten', 'tcp', '-ac'], { stdio: 'ignore' });
       await waitFor(() => fs.existsSync(`/tmp/.X11-unix/X${this.display.slice(1)}`), 5000, 'virtual display did not start');
+      await this.startBridge();
 
       this.procs.chrome = spawn(bin.chromium, [
         `--user-data-dir=${this.o.profileDir}`,
@@ -71,17 +101,38 @@ class BrowserLoginSession {
         '--password-store=basic',
         '--disable-features=Translate,MediaRouter,OptimizationHints',
         '--disable-sync',
+        '--disable-breakpad',
+        '--disable-crash-reporter',
+        // No GPU in a container: render in software rather than show a black window.
+        '--disable-gpu',
+        '--use-gl=swiftshader',
         '--lang=en-US',
         '--force-device-scale-factor=1',
         '--window-position=0,0',
         `--window-size=${this.width},${this.height}`,
+        // The sign-in bridge (see startBridge); nothing else may be loaded.
+        `--disable-extensions-except=${this.extDir}`,
+        `--load-extension=${this.extDir}`,
+        ...(this.o.config.login.extraArgs || []),
         `--app=${this.o.url}`,
-      ], { env, stdio: 'ignore' });
-      this.procs.chrome.on('exit', () => {
-        if (this.state === 'running') this.fail('The sign-in browser closed unexpectedly.');
+      ], { env, stdio: ['ignore', 'ignore', 'pipe'] });
+      const chrome = this.procs.chrome;
+      let stderr = '';
+      chrome.stderr.on('data', (d) => {
+        stderr = (stderr + d).slice(-4000);
       });
+      chrome.on('error', (e) => this.fail(`Could not start the sign-in browser: ${e.message}`));
+      chrome.on('exit', (code, signal) => {
+        if (this.state !== 'running' && this.state !== 'starting') return;
+        const why = stderr.split('\n').map((l) => l.trim()).filter((l) => l && !/^\[[\d/:.]+:(INFO|WARNING|VERBOSE)/.test(l)).slice(-3).join(' | ');
+        console.warn(`[login] chromium exited (${signal || code}): ${why || 'no output'}`);
+        this.fail(`The sign-in browser closed unexpectedly${why ? ` (${why.slice(0, 300)})` : ''}.`);
+      });
+      // Catch a browser that dies on startup instead of leaving a black screen.
+      await new Promise((r) => setTimeout(r, 1500));
+      if (chrome.exitCode !== null || chrome.signalCode) throw new Error(this.error || 'The sign-in browser did not start.');
 
-      this.startCapture(env);
+      this.env = env;
       this.state = 'running';
       this.watchTimer = setInterval(() => this.watch(), 1500);
     } catch (e) {
@@ -89,6 +140,133 @@ class BrowserLoginSession {
       throw e;
     }
     return this.status();
+  }
+
+  /**
+   * Private channel to the bridge extension inside the sign-in browser: a
+   * WebSocket on 127.0.0.1 with a random port and a one-time key. (The DevTools
+   * protocol can't be used: Google refuses sign-in from any browser started with
+   * remote debugging enabled.)
+   */
+  async startBridge() {
+    const key = crypto.randomBytes(24).toString('hex');
+    const wss = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 4 * 1024 * 1024 });
+    await new Promise((resolve, reject) => wss.once('listening', resolve).once('error', reject));
+    this.bridgeServer = wss;
+    this.bridgeCalls = new Map();
+    wss.on('connection', (ws, req) => {
+      if (new URL(req.url, 'http://x').searchParams.get('key') !== key) return ws.close();
+      this.bridge = ws;
+      ws.on('message', (data) => {
+        let m;
+        try {
+          m = JSON.parse(data);
+        } catch {
+          return;
+        }
+        if (m.t === 'reply') {
+          const call = this.bridgeCalls.get(m.id);
+          if (call) {
+            this.bridgeCalls.delete(m.id);
+            clearTimeout(call.timer);
+            call.resolve(m);
+          }
+        } else if (m.t === 'page' && m.page) {
+          this.onPage(m.page).catch(() => {});
+        }
+      });
+      ws.on('close', () => {
+        if (this.bridge === ws) this.bridge = null;
+      });
+    });
+    // The extension, with this session's address and key.
+    const dir = `${this.o.profileDir}-ext`;
+    await fsp.rm(dir, { recursive: true, force: true });
+    await fsp.mkdir(dir, { recursive: true });
+    const src = path.join(__dirname, 'extension');
+    for (const f of await fsp.readdir(src)) await fsp.copyFile(path.join(src, f), path.join(dir, f));
+    await fsp.writeFile(path.join(dir, 'reader.js'), readerScript);
+    await fsp.writeFile(path.join(dir, 'config.json'), JSON.stringify({ port: wss.address().port, key }));
+    this.extDir = dir;
+  }
+
+  /** Ask the extension something; resolves with its reply (or null). */
+  ask(msg, timeoutMs = 5000) {
+    const ws = this.bridge;
+    if (!ws || ws.readyState !== ws.OPEN) return Promise.resolve(null);
+    const id = ++this.bridgeSeq || (this.bridgeSeq = 1);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.bridgeCalls.delete(id);
+        resolve(null);
+      }, timeoutMs);
+      this.bridgeCalls.set(id, { resolve, timer });
+      ws.send(JSON.stringify({ ...msg, id }));
+    });
+  }
+
+  /** A new sign-in step from the page: pass it to the form. */
+  async onPage(pg) {
+    if (this.state !== 'running') return;
+    for (const img of pg.images || []) {
+      const loc = await this.ask({ t: 'locate', ref: img.ref });
+      const shot = loc && loc.view ? await this.ask({ t: 'snap', box: loc.view }) : null;
+      img.src = shot && shot.src ? shot.src : null;
+    }
+    this.page = pg;
+    this.broadcast({ t: 'page', page: pg });
+  }
+
+  xdo(args) {
+    return run(this.o.config.bin.xdotool, args, { timeoutMs: 15_000, env: { DISPLAY: this.display } });
+  }
+
+  /** A real (OS-level) click in the middle of an element; returns what the page said about it. */
+  async click(ref) {
+    const loc = await this.ask({ t: 'locate', ref });
+    if (!loc || !loc.box) return null;
+    const x = Math.round(loc.box.x + loc.box.w / 2);
+    const y = Math.round(loc.box.y + loc.box.h / 2);
+    await this.xdo(['mousemove', String(x), String(y), 'click', '1']);
+    return loc;
+  }
+
+  /** Put a value into a field the way a person would: click it, select all, type. */
+  async fill(f) {
+    const field = this.page && this.page.fields.find((x) => x.ref === f.ref);
+    if (!field) return;
+    if (field.kind === 'checkbox' || field.kind === 'radio') {
+      const loc = await this.ask({ t: 'locate', ref: f.ref });
+      if (loc && typeof f.checked === 'boolean' && f.checked !== !!loc.checked) await this.click(f.ref);
+      return;
+    }
+    if (field.kind === 'select') {
+      await this.ask({ t: 'select', ref: f.ref, value: String(f.value || '') });
+      return;
+    }
+    if (!(await this.click(f.ref))) return;
+    await this.xdo(['key', '--clearmodifiers', 'ctrl+a', 'BackSpace']);
+    if (f.value) await this.xdo(['type', '--clearmodifiers', '--delay', '8', '--', String(f.value)]);
+  }
+
+  /** Form submission from the app: fill fields, then click a button (or press Enter). */
+  async act(msg) {
+    try {
+      if (msg.t === 'form') {
+        for (const f of msg.fields || []) await this.fill(f);
+        if (msg.submit === 'enter') await this.xdo(['key', '--clearmodifiers', 'Return']);
+        else if (msg.submit) await this.click(msg.submit);
+      } else if (msg.t === 'click') {
+        await this.click(msg.ref);
+      } else if (msg.t === 'nav' && msg.to === 'back') {
+        await this.ask({ t: 'back' });
+      }
+    } catch (e) {
+      console.warn(`[login] ${msg.t}: ${e.message}`);
+    }
+    // Report the resulting step even if it looks unchanged, so the form can stop its spinner.
+    await delay(500);
+    this.ask({ t: 'read' });
   }
 
   startCapture(env) {
@@ -107,28 +285,48 @@ class BrowserLoginSession {
       }
     });
     ff.on('exit', () => {
-      if (this.state === 'running') setTimeout(() => this.state === 'running' && this.startCapture(env), 500);
+      if (this.procs.ffmpeg === ff) this.procs.ffmpeg = null;
+      if (this.state === 'running' && this.viewers.size) setTimeout(() => this.state === 'running' && this.viewers.size && !this.procs.ffmpeg && this.startCapture(env), 500);
     });
   }
 
-  /** Attach a screen viewer (JSMpeg WebSocket). Restart capture so the viewer gets a fresh header. */
+  /**
+   * Attach a screen viewer (JSMpeg WebSocket). The display is only captured while
+   * someone watches it (the browser view); the form needs no video.
+   */
   addViewer(ws) {
     this.viewers.add(ws);
     this.lastActivity = Date.now();
-    ws.on('close', () => this.viewers.delete(ws));
-    // No restart needed: a new GOP (with sequence header) starts every second (-g 25).
+    clearTimeout(this.captureStop);
+    if (!this.procs.ffmpeg && this.state === 'running') this.startCapture(this.env);
+    ws.on('close', () => {
+      this.viewers.delete(ws);
+      if (this.viewers.size) return;
+      clearTimeout(this.captureStop);
+      this.captureStop = setTimeout(() => {
+        if (!this.viewers.size && this.procs.ffmpeg) this.procs.ffmpeg.kill('SIGKILL');
+      }, 10_000);
+    });
+    // New viewers need no restart: a new GOP (with sequence header) starts every second (-g 25).
   }
 
   addInputSocket(ws) {
     this.inputSockets = this.inputSockets || new Set();
     this.inputSockets.add(ws);
+    this.lastActivity = Date.now();
     ws.on('close', () => this.inputSockets.delete(ws));
+    if (this.page && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ t: 'page', page: this.page }));
+    else this.ask({ t: 'read' });
   }
 
   /** Inputs from the client, already validated by parseInput. */
   input(msg) {
     this.lastActivity = Date.now();
     if (this.state !== 'running') return;
+    if (msg.t === 'form' || msg.t === 'click' || msg.t === 'nav') {
+      this.actions = (this.actions || Promise.resolve()).then(() => this.act(msg));
+      return;
+    }
     const W = this.width;
     const H = this.height;
     const xy = (m) => [clampInt(m.x * W, 0, W - 1), clampInt(m.y * H, 0, H - 1)];
@@ -176,7 +374,7 @@ class BrowserLoginSession {
   /** Auto-finish when the browser lands on the signed-in page; time out abandoned sessions. */
   async watch() {
     if (this.state !== 'running') return;
-    if (Date.now() - this.lastActivity > this.o.config.login.idleTimeoutMs && !this.viewers.size) {
+    if (Date.now() - this.lastActivity > this.o.config.login.idleTimeoutMs && !this.viewers.size && !this.inputSockets?.size) {
       this.fail('Sign-in timed out.');
       return this.cleanup();
     }
@@ -223,6 +421,15 @@ class BrowserLoginSession {
 
   async cleanup() {
     clearInterval(this.watchTimer);
+    clearTimeout(this.captureStop);
+    this.page = null;
+    if (this.bridgeServer) {
+      for (const c of this.bridgeServer.clients) c.terminate();
+      this.bridgeServer.close();
+      this.bridgeServer = null;
+    }
+    this.bridge = null;
+    if (this.extDir) await fsp.rm(this.extDir, { recursive: true, force: true }).catch(() => {});
     for (const p of [this.procs.ffmpeg, this.procs.chrome, this.procs.xvfb]) {
       if (p && p.exitCode === null) p.kill('SIGKILL');
     }
@@ -260,6 +467,16 @@ function parseInput(raw) {
   const num = (v) => typeof v === 'number' && Number.isFinite(v);
   if (['move', 'down', 'up'].includes(m.t) && !(num(m.x) && num(m.y))) return null;
   if (m.t === 'wheel' && !num(m.dy)) return null;
+  const ref = (v) => typeof v === 'string' && /^\d{1,7}$/.test(v);
+  if (m.t === 'click' && !ref(m.ref)) return null;
+  if (m.t === 'form') {
+    if (!Array.isArray(m.fields) || m.fields.length > 16) return null;
+    if (m.submit != null && m.submit !== 'enter' && !ref(m.submit)) return null;
+    const ok = m.fields.every((f) => f && ref(f.ref)
+      && (f.value === undefined || (typeof f.value === 'string' && f.value.length <= 512))
+      && (f.checked === undefined || typeof f.checked === 'boolean'));
+    if (!ok) return null;
+  }
   return m;
 }
 

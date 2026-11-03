@@ -238,9 +238,23 @@ function isShort(n) {
   return false;
 }
 
-/** Map any supported node; unknown or unsupported (Shorts) -> null. */
+// Ads and promotions YouTube mixes into feeds (ad slots, promoted videos, banners...).
+const AD_TYPES = /(^|[a-z])Ads?([A-Z]|$)|Promoted|Promo$|^SearchPyv|^BannerPromo|^StatementBanner|^MovieOffer|^BrandVideo/;
+
+/** Is this an ad or promoted item? Never shown in MPEG-YT. */
+function isAd(n) {
+  if (!n || typeof n !== 'object') return false;
+  if (AD_TYPES.test(n.type || '')) return true;
+  if (n.type === 'RichItem') return isAd(n.content);
+  const labels = (n.badges || []).map((b) => (b?.label || b?.text || '').trim());
+  if (labels.some((l) => /^(ad|ads|sponsored|promoted)$/i.test(l))) return true;
+  const url = endpointOf(n)?.metadata?.url || '';
+  return /googleadservices|doubleclick|\/pagead\//.test(url);
+}
+
+/** Map any supported node; unsupported (Shorts, ads) -> null. */
 function item(node) {
-  if (!node || isShort(node)) return null;
+  if (!node || isShort(node) || isAd(node)) return null;
   switch (node.type) {
     case 'RichItem':
       return item(node.content);
@@ -312,7 +326,7 @@ function ordered(root) {
       for (const x of v) walk(x, depth + 1);
       return;
     }
-    if (v.type && isShort(v)) return;
+    if (v.type && (isShort(v) || isAd(v))) return;
     if (v.type && ITEM_TYPES.has(v.type)) {
       out.push(v);
       return;
@@ -323,4 +337,4 @@ function ordered(root) {
   return out;
 }
 
-module.exports = { item, items, ordered, isShort, txt, clean, pickImage, parseCount, parseAge, parseDuration, shortViews, author, fixUrl };
+module.exports = { item, items, ordered, isShort, isAd, txt, clean, pickImage, parseCount, parseAge, parseDuration, shortViews, author, fixUrl };

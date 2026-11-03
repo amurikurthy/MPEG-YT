@@ -144,9 +144,18 @@ smoothly, instead of stuttering.
 
 Tap **Sign in**, then **Sign in with Google**.
 
-- A temporary Chromium starts **inside the container** on Google's sign-in page and is streamed to your
-  screen through the same MPEG-1 → canvas pipeline. Tap to click, drag to scroll, and type in the bar at
-  the bottom. Passwords and 2FA work as usual.
+- A temporary Chromium starts **inside the container** on Google's real sign-in page. MPEG-YT shows
+  each step as a native form: email, password, 2-Step Verification (authenticator or SMS codes, "tap Yes
+  on your phone" with the number to tap, backup codes, "Try another way"), captchas, and choices like
+  "Don't ask again". What you enter is typed and clicked into Google's page with real keyboard and mouse
+  events.
+- The form reads the page by its headings, labelled fields and buttons (what screen readers use), not
+  by Google's layout, so it should survive Google redesigns. If a step can't be shown as a form (a
+  reCAPTCHA puzzle, an unfamiliar page), MPEG-YT switches to the **browser view**: the sign-in browser
+  streamed through the same MPEG-1 → canvas pipeline. Tap to click, drag to scroll, type in the bar at the
+  bottom. **Use browser view** is always available below the form.
+- A small built-in extension reads the page; Google refuses sign-in from browsers under remote
+  debugging, so that is avoided.
 - When you land back on YouTube, MPEG-YT notices automatically. You can also tap **Done**. It then saves only
   the YouTube session cookies to `/config/youtube-cookies.txt` (mode 600) and deletes the browser and its
   profile.
@@ -175,6 +184,9 @@ happens, the player shows a **Sign in** button. Anyone who can open your MPEG-YT
 | `AUTH_TOKEN` | — | If set, open `/?token=…` once; a cookie is then set |
 | `PUID` / `PGID` | `1000` / `1000` | User/group the app runs as; `/config` and `/cache` are chowned to it at start |
 | `LOGIN_BROWSER` | on | `0` disables in-app sign-in (cookies.txt upload still works) |
+| `LOGIN_BROWSER_ARGS` | — | Comma-separated extra Chromium flags for the sign-in browser (e.g. `--proxy-server=…`) |
+| `SPONSORBLOCK` | on | `0` turns off the server's SponsorBlock lookups |
+| `SPONSORBLOCK_CATEGORIES` | `sponsor,selfpromo` | SponsorBlock segment categories to report |
 | `YTDLP_COOKIES` | — | Use a cookies.txt you manage yourself instead of in-app sign-in |
 | `YTDLP_EXTRA_ARGS` | — | Comma-separated extra yt-dlp flags |
 
@@ -192,12 +204,16 @@ server/src/
   yt/account.js             saved session, sign-in, cookies.txt upload
   stream/transcoder.js      ffmpeg: MPEG-1 720p/30, loudness-normalized MP2
   stream/session.js         one WebSocket = one ffmpeg; flow control; friendly errors
-  login/browser-session.js  temporary sign-in browser: Xvfb + Chromium -> ffmpeg x11grab -> JSMpeg, xdotool input
+  login/browser-session.js  temporary sign-in browser (Xvfb + Chromium), form actions via xdotool,
+                            browser view: ffmpeg x11grab -> JSMpeg
+  login/page-reader.js      turns the current sign-in step into a form description
+  login/extension/          bridge extension: reports the step, locates elements, captures captchas
+  yt/sponsorblock.js        SponsorBlock segments (cached)
 public/
   js/app.js                 router (YouTube's URLs), masthead, guide, account menu
   js/views/                 home · results · watch · channel · library
   js/player.js              canvas player: custom JSMpeg source, timed playback, gestures
-  js/account.js             sign-in sheet and remote sign-in screen
+  js/account.js             sign-in sheet, native sign-in form, browser view
   vendor/jsmpeg.min.js      JSMpeg (MIT, phoboslab/jsmpeg)
 ```
 

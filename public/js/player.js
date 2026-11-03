@@ -433,7 +433,7 @@ export class CanvasPlayer {
 
     this.controls = h('div', { class: 'controls' },
       this.seek,
-      h('div', { class: 'row' },
+      h('div', { class: 'ctl-row' },
         this.playBtn,
         this.nextBtn,
         h('div', { class: 'volume' }, this.volBtn, this.volRange),
@@ -780,6 +780,13 @@ export class CanvasPlayer {
     if (entry.failed || entry.disposed) return;
     entry.failed = true;
     if (entry !== this.active && entry !== this.pending) return;
+    // Expired/refused stream links: the server already dropped them, so one quiet
+    // retry at the same spot nearly always works (like refreshing the page did).
+    const retryable = code === 'expired' || (code === 'signin' && window.mpegyt?.session?.signedIn);
+    if (retryable && !(now() - (this.autoRetryAt || -1e9) < 30_000)) {
+      this.autoRetryAt = now();
+      return this.load(this.position);
+    }
     const signIn = code === 'signin' && window.mpegyt && !window.mpegyt.session?.signedIn;
     this.errorEl.replaceChildren(...[
       h('p', {}, message || 'Playback failed.'),

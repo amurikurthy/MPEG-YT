@@ -16,6 +16,11 @@ if [ "$(id -u)" = "0" ]; then
       chown -R "$PUID:$PGID" "$d" 2>/dev/null || echo "[entrypoint] warning: could not change ownership of $d (read-only or network mount?)"
     fi
   done
+  # setpriv keeps root's environment; give the app user its own writable HOME
+  # (Chromium, for the sign-in browser, refuses to start without one).
+  export HOME=/home/node USER=node
+  mkdir -p "$HOME"
+  chown "$PUID:$PGID" "$HOME" 2>/dev/null || true
   exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups "$@"
 fi
 

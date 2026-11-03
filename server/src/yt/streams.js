@@ -159,6 +159,11 @@ class Streams {
     if (this.python) this.startWorker();
   }
 
+  /** Forget a video's resolved stream links (YouTube refused them); the next play re-resolves. */
+  invalidate(id) {
+    this.infos.delete(id);
+  }
+
   info(id) {
     if (!/^[\w-]{11}$/.test(id)) return Promise.reject(new HttpError(400, 'bad video id'));
     const url = `${YT}/watch?v=${id}`;

@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "MPEG-YT sign-in bridge",
+  "version": "1.0",
+  "description": "Shows the Google sign-in steps as a form in MPEG-YT. Only loaded into the temporary sign-in browser.",
+  "permissions": ["tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["https://accounts.google.com/*"],
+    "js": ["reader.js", "content.js"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }]
+}

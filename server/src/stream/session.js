@@ -20,14 +20,16 @@ let active = 0;
  * plus smooth, buffered playback, instead of JSMpeg's low-latency live mode.
  */
 async function handleStream(ws, params, streams, cfg) {
+  const id = params.get('id');
   const fail = (raw) => {
+    // A refused/expired source link: forget it so the next attempt resolves fresh ones.
+    if (id && RETRYABLE.test(String(raw))) streams.invalidate?.(id);
     if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify({ t: 'error', ...explain(raw) }));
+      ws.send(JSON.stringify({ t: 'error', ...explain(raw, streams.account?.signedIn) }));
       ws.close(1011, 'error');
     }
   };
 
-  const id = params.get('id');
   if (!id) return fail('missing id');
   if (active >= cfg.stream.maxConcurrent) return fail('server busy: too many concurrent streams');
 
@@ -73,8 +75,6 @@ async function handleStream(ws, params, streams, cfg) {
     seekable: !!media.seekable,
   }));
 
-  child = spawnTranscoder(media, p, cfg);
-  const out = child.stdout;
   const high = cfg.stream.bufferAhead;
   const low = Math.max(1, high - 4);
   let headroom = null; // unknown until the client reports
@@ -92,13 +92,53 @@ async function handleStream(ws, params, streams, cfg) {
     }
   };
 
-  out.on('data', (chunk) => {
-    if (ws.readyState !== ws.OPEN) return;
-    ws.send(chunk, { binary: true });
-    if (ws.bufferedAmount > WS_HIGH_WATER) updateFlow();
-  });
+  let out = null;
+  let sent = 0;
+  let retried = false;
+  const spawn = () => {
+    child = spawnTranscoder(media, p, cfg);
+    out = child.stdout;
+    reading = true;
+    out.on('data', (chunk) => {
+      if (ws.readyState !== ws.OPEN) return;
+      sent += chunk.length;
+      ws.send(chunk, { binary: true });
+      if (ws.bufferedAmount > WS_HIGH_WATER) updateFlow();
+    });
+    child.on('error', (e) => fail(`ffmpeg: ${e.message}`));
+    child.on('close', onExit);
+  };
+
+  const onExit = async (code, signal) => {
+    if (closed || ws.readyState !== ws.OPEN) return clearInterval(timer);
+    if (code === 0) {
+      clearInterval(timer);
+      return ws.send(JSON.stringify({ t: 'eof' }));
+    }
+    const tail = child.stderrTail.trim().split('\n').slice(-2).join(' | ');
+    console.warn(`[stream] ${id}: ffmpeg exited ${signal || code}: ${tail}`);
+    // YouTube refused the cached stream links (expired, or issued to a different
+    // session): resolve fresh ones and start over - nothing was sent yet, so the
+    // viewer just sees a slightly longer load.
+    if (!retried && sent === 0 && RETRYABLE.test(tail)) {
+      retried = true;
+      streams.invalidate?.(id);
+      try {
+        media = await streams.resolve(id);
+      } catch (e) {
+        clearInterval(timer);
+        return fail(e.message);
+      }
+      if (closed) return;
+      console.log(`[stream] ${id}: retrying with fresh stream links`);
+      return spawn();
+    }
+    clearInterval(timer);
+    fail(`transcoder stopped (${signal || code}) ${tail}`.trim());
+  };
 
   const timer = setInterval(updateFlow, 200);
+  spawn();
   // Report what's already downloaded (seek bar's gray ranges) about once a second.
   let lastCached = '';
   const cachedTimer = setInterval(() => {
@@ -125,23 +165,13 @@ async function handleStream(ws, params, streams, cfg) {
       updateFlow();
     }
   });
-
-  child.on('error', (e) => fail(`ffmpeg: ${e.message}`));
-  child.on('close', (code, signal) => {
-    clearInterval(timer);
-    if (closed || ws.readyState !== ws.OPEN) return;
-    if (code === 0) {
-      ws.send(JSON.stringify({ t: 'eof' }));
-    } else {
-      const tail = child.stderrTail.trim().split('\n').slice(-2).join(' | ');
-      console.warn(`[stream] ffmpeg exited ${signal || code}: ${tail}`);
-      fail(`transcoder stopped (${signal || code}) ${tail}`.trim());
-    }
-  });
 }
 
+/** Errors that fresh stream links usually fix. */
+const RETRYABLE = /\b(403|410)\b|forbidden|\bgone\b|expired/i;
+
 /** Turn yt-dlp/ffmpeg failures into something a viewer can act on. */
-function explain(raw) {
+function explain(raw, signedIn = false) {
   const msg = String(raw || '');
   if (/confirm you.?re not a bot|sign in to confirm|LOGIN_REQUIRED/i.test(msg)) {
     return { code: 'signin', message: 'YouTube wants this server to sign in before it plays videos. Sign in to continue.' };
@@ -149,7 +179,10 @@ function explain(raw) {
   if (/age.?restricted|confirm your age|inappropriate for some users/i.test(msg)) {
     return { code: 'signin', message: 'This video is age-restricted. Sign in with an account that can watch it.' };
   }
-  if (/\b403\b|forbidden/i.test(msg)) {
+  if (RETRYABLE.test(msg) && signedIn) {
+    return { code: 'expired', message: 'YouTube stopped sending this video. Retrying usually fixes it.' };
+  }
+  if (RETRYABLE.test(msg)) {
     return { code: 'signin', message: 'YouTube refused to send this video to the server. Signing in usually fixes this.' };
   }
   if (/members.?only|join this channel/i.test(msg)) return { code: 'unavailable', message: 'This video is for channel members only.' };

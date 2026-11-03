@@ -9,6 +9,7 @@ const { createApi } = require('./api');
 const { Account } = require('./yt/account');
 const { Streams } = require('./yt/streams');
 const { YouTube } = require('./yt/innertube');
+const { SponsorBlock } = require('./yt/sponsorblock');
 const { handleStream, activeStreams } = require('./stream/session');
 const { parseInput } = require('./login/browser-session');
 
@@ -104,7 +105,7 @@ async function main() {
   await streams.init().catch((e) => console.warn(`[streams] yt-dlp not available: ${e.message}`));
   yt = new YouTube(cfg, account);
   yt.session().catch((e) => console.warn(`[yt] could not reach YouTube yet: ${e.message}`));
-  const api = createApi({ yt, streams, account, cfg });
+  const api = createApi({ yt, streams, account, sponsor: new SponsorBlock(cfg), cfg });
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');

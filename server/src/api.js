@@ -19,7 +19,7 @@ const { HttpError } = require('./yt/account');
  * POSTs must carry X-MPEG-YT: 1 - a custom header forces a CORS preflight, so other
  * sites can't trigger them with a plain form post.
  */
-function createApi({ yt, streams, account, cfg }) {
+function createApi({ yt, streams, account, sponsor, cfg }) {
   return async function api(req, res, url) {
     const parts = url.pathname.split('/').filter(Boolean).slice(1).map(decodeURIComponent); // drop 'api'
     const q = url.searchParams;
@@ -56,6 +56,8 @@ function createApi({ yt, streams, account, cfg }) {
         }
         case 'video':
           return json(res, 200, await yt.video(need(arg)), 'private, max-age=60');
+        case 'sponsor':
+          return json(res, 200, { segments: await sponsor.segments(need(arg)) }, 'private, max-age=3600');
         case 'comments':
           return json(res, 200, await yt.comments(need(arg), q.get('sort') === 'new' ? 'new' : 'top'));
         case 'channel':
