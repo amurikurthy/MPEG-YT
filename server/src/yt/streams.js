@@ -230,6 +230,7 @@ class Streams {
         url: cached ? this.cache.register(SourceCache.key(id, f.format_id), f.url, f.http_headers) : f.url,
         headers: cached ? undefined : f.http_headers,
         local: cached,
+        cacheKey: cached ? SourceCache.key(id, f.format_id) : undefined,
         hasVideo,
         hasAudio,
       };
@@ -251,6 +252,28 @@ class Streams {
       seekable: !sel.live,
       live: sel.live,
     };
+  }
+
+  /** Parts of a resolved stream already downloaded (all inputs), as [start, end] fractions. */
+  coverage(media) {
+    const keys = media.inputs.map((i) => i.cacheKey).filter(Boolean);
+    if (!keys.length || keys.length !== media.inputs.length) return null;
+    let acc = [[0, 1]];
+    for (const k of keys) {
+      const runs = this.cache.coverage(k);
+      if (!runs) return null;
+      // Intersect: a moment is playable from disk only if both video and audio are there.
+      const out = [];
+      for (const [a1, b1] of acc) {
+        for (const [a2, b2] of runs) {
+          const a = Math.max(a1, a2);
+          const b = Math.min(b1, b2);
+          if (b > a) out.push([a, b]);
+        }
+      }
+      acc = out;
+    }
+    return acc.map(([a, b]) => [Math.round(a * 1e4) / 1e4, Math.round(b * 1e4) / 1e4]);
   }
 
   /** Fire-and-forget: add a play to the signed-in account's YouTube history (once per 6h). */

@@ -533,6 +533,8 @@ a.channel-name:hover { color: var(--text); }
 .seek:hover .track, .seek.dragging .track { height: 5px; }
 .buf, .prog { position: absolute; left: 0; top: 0; bottom: 0; }
 .buf { background: rgba(255, 255, 255, 0.4); }
+.cached { position: absolute; inset: 0; }
+.cached span { position: absolute; top: 0; bottom: 0; background: rgba(255, 255, 255, 0.4); }
 .prog { background: var(--red); }
 .knob { position: absolute; top: 50%; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border-radius: 50%; background: var(--red); transform: scale(0); transition: transform 0.1s; }
 .seek:hover .knob, .seek.dragging .knob { transform: scale(1); }

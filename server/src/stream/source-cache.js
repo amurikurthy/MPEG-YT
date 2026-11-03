@@ -307,6 +307,26 @@ class SourceCache {
     return `http://127.0.0.1:${this.port}/${encodeURIComponent(key)}`;
   }
 
+  /**
+   * Downloaded parts of a source as [start, end] fractions of the file (merged runs of
+   * chunks). Used for the seek bar's gray "loaded" ranges.
+   */
+  coverage(key) {
+    const e = this.entries.get(key);
+    if (!e || !e.state || !e.size) return null;
+    const runs = [];
+    const n = e.chunks;
+    for (let i = 0; i < n; i++) {
+      if (e.state[i] !== 2) continue;
+      const a = (i * CHUNK) / e.size;
+      const b = Math.min(1, ((i + 1) * CHUNK) / e.size);
+      const last = runs[runs.length - 1];
+      if (last && Math.abs(last[1] - a) < 1e-9) last[1] = b;
+      else runs.push([a, b]);
+    }
+    return runs;
+  }
+
   /** Prefetch the first `bytes` of a source so playback starts from local data. */
   warm(key, url, headers, bytes) {
     this.register(key, url, headers);

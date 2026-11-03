@@ -415,12 +415,13 @@ export class CanvasPlayer {
     this.errorEl = h('div', { class: 'player-error', hidden: true });
     this.endScreen = h('div', { class: 'end-screen', hidden: true });
 
+    this.seekCached = h('div', { class: 'cached' });
     this.seekBuf = h('div', { class: 'buf' });
     this.seekProg = h('div', { class: 'prog' });
     this.seekKnob = h('div', { class: 'knob' });
     this.seekTip = h('div', { class: 'tip', hidden: true });
     this.seek = h('div', { class: 'seek', role: 'slider', tabindex: '-1', 'aria-label': 'Seek' },
-      h('div', { class: 'track' }, this.seekBuf, this.seekProg), this.seekKnob, this.seekTip);
+      h('div', { class: 'track' }, this.seekCached, this.seekBuf, this.seekProg), this.seekKnob, this.seekTip);
 
     this.playBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Play/pause (k)' }, icon('pause'));
     this.volBtn = h('button', { class: 'ctl', type: 'button', 'aria-label': 'Mute (m)' }, icon('volume'));
@@ -715,6 +716,7 @@ export class CanvasPlayer {
   }
 
   onControl(entry, m) {
+    if (m.t === 'cached') return this.drawCached(m.ranges);
     if (m.t === 'error') this.fail(entry, m.message, m.code);
   }
 
@@ -938,6 +940,7 @@ export class CanvasPlayer {
   pause() {
     if (this.paused) return;
     this.paused = true;
+    this.pausedAt = now();
     if (this.active && this.active.started && !this.active.holding) this.freeze(this.active);
     this.audioOff(this.active);
     this.playBtn.replaceChildren(icon('play'));
@@ -1080,6 +1083,18 @@ export class CanvasPlayer {
         ms.setPositionState({ duration: this.duration, playbackRate: 1, position: clamp(this.position, 0, this.duration) });
       } catch { /* position briefly out of range during a seek */ }
     }
+  }
+
+  /**
+   * Gray "loaded" ranges in the seek bar: what the server has already downloaded. It
+   * survives seeks (unlike the current stream's buffer), so the bar doesn't reset.
+   */
+  drawCached(ranges) {
+    const key = JSON.stringify(ranges || []);
+    if (key === this.cachedKey) return;
+    this.cachedKey = key;
+    this.seekCached.replaceChildren(...(ranges || []).map(([a, b]) =>
+      h('span', { style: { left: `${a * 100}%`, width: `${(b - a) * 100}%` } })));
   }
 
   setTheater(on) {
@@ -1239,7 +1254,10 @@ export class CanvasPlayer {
     if (this.spinner.hidden === !!spin) this.spinner.hidden = !spin;
 
     const controlsUp = !this.root.classList.contains('idle');
-    const showCenter = (this.paused && !loading) || this.ended || (this.isTouch && controlsUp && !spin && !this.tapSeek);
+    // On pause, let the pause animation finish before the big play button appears
+    // (touch screens use that button as the control, so it shows right away there).
+    const pauseSettled = this.isTouch || now() - (this.pausedAt || 0) > 500;
+    const showCenter = (this.paused && !loading && pauseSettled) || this.ended || (this.isTouch && controlsUp && !spin && !this.tapSeek);
     const centerIcon = this.ended ? 'replay' : this.paused ? 'play' : 'pause';
     if (this.center.hidden === showCenter || this.center.dataset.icon !== centerIcon) {
       this.center.hidden = !showCenter;

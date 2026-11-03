@@ -99,6 +99,17 @@ async function handleStream(ws, params, streams, cfg) {
   });
 
   const timer = setInterval(updateFlow, 200);
+  // Report what's already downloaded (seek bar's gray ranges) about once a second.
+  let lastCached = '';
+  const cachedTimer = setInterval(() => {
+    if (ws.readyState !== ws.OPEN || typeof streams.coverage !== 'function') return;
+    const ranges = streams.coverage(media);
+    const key = JSON.stringify(ranges);
+    if (!ranges || key === lastCached) return;
+    lastCached = key;
+    ws.send(JSON.stringify({ t: 'cached', ranges }));
+  }, 1000);
+  ws.on('close', () => clearInterval(cachedTimer));
   ws.on('close', () => clearInterval(timer));
 
   ws.on('message', (data, isBinary) => {
