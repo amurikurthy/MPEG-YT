@@ -782,7 +782,9 @@ export class CanvasPlayer {
     if (entry !== this.active && entry !== this.pending) return;
     // Expired/refused stream links: the server already dropped them, so one quiet
     // retry at the same spot nearly always works (like refreshing the page did).
-    const retryable = code === 'expired' || (code === 'signin' && window.mpegyt?.session?.signedIn);
+    // Only mid-playback: before the first frame the server has already retried with
+    // fresh links, and another round would just make a slow start slower.
+    const retryable = entry.started && (code === 'expired' || (code === 'signin' && window.mpegyt?.session?.signedIn));
     if (retryable && !(now() - (this.autoRetryAt || -1e9) < 30_000)) {
       this.autoRetryAt = now();
       return this.load(this.position);

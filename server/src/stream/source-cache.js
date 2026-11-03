@@ -98,23 +98,54 @@ class Entry {
     }
   }
 
+  /**
+   * YouTube's links only work from the IP address they were issued to (the ip=
+   * parameter). If yt-dlp got the link over IPv4 and we download over IPv6 (or
+   * the other way round), YouTube answers 403 - so connect with the same family.
+   */
+  linkFamily() {
+    if (this.unpinned) return undefined;
+    let ip = null;
+    try {
+      ip = new URL(this.url).searchParams.get('ip');
+    } catch { /* no URL */ }
+    if (!ip) return undefined;
+    return ip.includes(':') ? 6 : 4;
+  }
+
   fetchFrom(url, start, end, redirects) {
+    return this.fetchOnce(url, start, end, redirects, this.linkFamily()).catch((e) => {
+      // This server can't reach YouTube over that family at all: stop pinning.
+      if (this.linkFamily() && /ENETUNREACH|EHOSTUNREACH|EADDRNOTAVAIL|ECONNREFUSED|ENOTFOUND|EAI_|EAFNOSUPPORT/.test(e.code || e.message)) {
+        this.unpinned = true;
+        return this.fetchOnce(url, start, end, redirects, undefined);
+      }
+      throw e;
+    });
+  }
+
+  fetchOnce(url, start, end, redirects, family) {
     return new Promise((resolve, reject) => {
       const u = new URL(url);
       const req = (u.protocol === 'https:' ? https : http).get(u, {
         agent: u.protocol === 'https:' ? agent : undefined,
         headers: { ...this.headers, Range: `bytes=${start}-${end}` },
         timeout: 20_000,
+        ...(family ? { family } : {}),
       }, (res) => {
         if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirects > 0) {
           res.resume();
           const next = new URL(res.headers.location, u).toString();
           this.resolvedUrl = next;
-          return resolve(this.fetchFrom(next, start, end, redirects - 1));
+          return resolve(this.fetchOnce(next, start, end, redirects - 1, family));
         }
         if (res.statusCode !== 206 && res.statusCode !== 200) {
           res.resume();
-          return reject(Object.assign(new Error(`source HTTP ${res.statusCode}`), { status: res.statusCode }));
+          const via = res.socket && res.socket.remoteFamily;
+          return reject(Object.assign(new Error(`source HTTP ${res.statusCode}`), {
+            status: res.statusCode,
+            detail: `client ${new URL(this.url).searchParams.get('c') || '?'}, link for IPv${this.linkFamily() || '?'}, connected over ${via || 'proxy'}`,
+          }));
         }
         const total = /\/(\d+)$/.exec(res.headers['content-range'] || '');
         if (total && !this.size) this.size = Number(total[1]);
@@ -238,7 +269,7 @@ class Entry {
       // Pass YouTube's refusal through so ffmpeg (and the viewer) see why.
       if (!res.headersSent) res.writeHead(e.status || 502, { 'Content-Length': 0 }).end();
       else res.destroy();
-      console.warn(`[cache] ${this.key}: ${e.status ? `YouTube answered HTTP ${e.status}` : e.code || e.message}`);
+      console.warn(`[cache] ${this.key}: ${e.status ? `YouTube answered HTTP ${e.status} (${e.detail})` : e.code || e.message}`);
     } finally {
       this.users--;
     }
