@@ -111,6 +111,11 @@ function patchJSMpeg() {
     if (!this.guard) {
       this.guard = ctx.createGain();
       this.guard.connect(this.destination);
+      // Volume -> shared boost + limiter -> speakers (instead of straight out).
+      try {
+        this.gain.disconnect();
+        this.gain.connect(masterOut(ctx));
+      } catch { /* keep the direct route */ }
     }
     src.connect(this.guard);
     src.start(this._next / sampleRate);
@@ -287,6 +292,30 @@ function ensureAudioContext() {
   }
 }
 const now = () => performance.now();
+
+/**
+ * Output level: twice the stream's level (+6 dB), so 100% volume sits with other
+ * apps instead of far below them. The stream is already loudness-normalized with
+ * peaks up to -1.5 dBFS, so a fast limiter after the boost catches the loudest
+ * moments instead of letting them clip. One chain per AudioContext, shared by all
+ * players.
+ */
+const OUTPUT_BOOST = 2;
+function masterOut(ctx) {
+  if (ctx._mpegytOut) return ctx._mpegytOut;
+  const boost = ctx.createGain();
+  boost.gain.value = OUTPUT_BOOST;
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -2; // dBFS
+  limiter.knee.value = 0;
+  limiter.ratio.value = 20;
+  limiter.attack.value = 0.002;
+  limiter.release.value = 0.12;
+  boost.connect(limiter);
+  limiter.connect(ctx.destination);
+  ctx._mpegytOut = boost;
+  return boost;
+}
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 // Fullscreen with WebKit-prefixed fallbacks (older iPadOS Safari).
 const fsElement = () => document.fullscreenElement || document.webkitFullscreenElement || null;
