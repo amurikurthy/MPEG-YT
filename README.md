@@ -27,12 +27,13 @@ There is no `<video>` element anywhere in the client.
 
 ## Run it
 
-GitHub Actions builds the image for **amd64 and arm64** and publishes it to `ghcr.io/amurikurthy/mpeg-yt`.
+GitHub Actions builds the image for **amd64 and arm64** and publishes it to `ghcr.io/amurikurthy/mpeg-yt`
+(image names are always lowercase).
 You only need [`docker-compose.yml`](docker-compose.yml):
 
 ```bash
 mkdir mpeg-yt && cd mpeg-yt
-curl -fsSLO https://raw.githubusercontent.com/amurikurthy/mpeg-yt/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/amurikurthy/MPEG-YT/main/docker-compose.yml
 docker compose up -d
 ```
 

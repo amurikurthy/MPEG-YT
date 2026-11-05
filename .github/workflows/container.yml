@@ -1,9 +1,10 @@
 name: Container image
 
 # Builds the Docker image and publishes it to GitHub Container Registry:
-#   ghcr.io/<owner>/<repo>:latest      latest build of the default branch
-#   ghcr.io/<owner>/<repo>:sha-<short> every build of the default branch
-#   ghcr.io/<owner>/<repo>:1.2.3, :1.2 git tags like v1.2.3
+#   ghcr.io/<owner>/mpeg-yt:latest      latest build of the default branch
+#   ghcr.io/<owner>/mpeg-yt:sha-<short> every build of the default branch
+#   ghcr.io/<owner>/mpeg-yt:1.2.3, :1.2 git tags like v1.2.3
+# Image names must be lowercase, so the image is mpeg-yt although the repository is MPEG-YT.
 # Pull requests are built (to catch breakage) but not published.
 
 on:
@@ -48,7 +49,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository_owner }}/mpeg-yt
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=short,enable={{is_default_branch}}
@@ -57,7 +58,7 @@ jobs:
             type=ref,event=pr
           labels: |
             org.opencontainers.image.title=MPEG-YT
-            org.opencontainers.image.description=Tablet-first YouTube browser; video streamed as MPEG-1 over WebSocket to a JSMpeg WebGL canvas
+            org.opencontainers.image.description=Self-hosted YouTube client that plays video without a <video> element (MPEG-1 over WebSocket to a WebGL canvas)
 
       - name: Build and push
         uses: docker/build-push-action@v6
