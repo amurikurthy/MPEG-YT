@@ -1,8 +1,12 @@
 # MPEG-YT
 
-A self-hosted YouTube client that looks and feels like YouTube. It's built for tablets and works on
-desktop. Browsing is a native web app driven by YouTube's own data, so you get the real home feed,
-recommendations, view counts and dates. **Only the video** goes through the streaming pipeline:
+A self-hosted YouTube client that plays video **without a `<video>` element**. Video is decoded in
+WebAssembly and drawn on a WebGL `<canvas>`, so it plays in browsers that block or restrict the video
+element, such as some in-car, kiosk and other locked-down browsers.
+
+It looks and feels like YouTube. It's built for tablets and works on desktop. Browsing is a native web app
+driven by YouTube's own data, so you get the real home feed, recommendations, view counts and dates.
+**Only the video** goes through the streaming pipeline:
 
 ```
 YouTube (yt-dlp) ─► ffmpeg ─ MPEG-1 720p/30 + MP2 audio in MPEG-TS ─► WebSocket ─► JSMpeg (WASM) ─► WebGL <canvas>
@@ -10,6 +14,16 @@ YouTube (yt-dlp) ─► ffmpeg ─ MPEG-1 720p/30 + MP2 audio in MPEG-TS ─► 
 ```
 
 There is no `<video>` element anywhere in the client.
+
+![Home feed](docs/screenshots/home.webp)
+
+| Watch page with scrub preview | Search |
+|---|---|
+| ![Watch page](docs/screenshots/watch.webp) | ![Search results](docs/screenshots/search.webp) |
+| **Sign in with Google (native form)** | **Light theme** |
+| ![Sign-in form](docs/screenshots/signin.webp) | ![Light theme](docs/screenshots/home-light.webp) |
+
+<sub>Screenshots at tablet size (1280×800). The video is Blender's *Big Buck Bunny* (CC BY 3.0).</sub>
 
 ## Run it
 
@@ -70,6 +84,10 @@ path `/healthz`.
   - **Library:** channel pages (Latest / Popular / Oldest), Subscriptions, History, Watch later, Liked
     videos, Playlists and playlist playback.
   - **Theme:** dark by default; light under **Appearance**.
+- **No Shorts, no ads:** Shorts and ads or promoted items are filtered out of every feed, search and Up
+  Next.
+- **Endless feeds:** home, search, channels and lists keep loading as you scroll. Hung requests are
+  retried, and a **Load more** button appears if YouTube stops answering.
 - **YouTube's own data via InnerTube**, the API youtube.com itself uses (through
   [youtubei.js](https://github.com/LuanRT/YouTube.js)):
   - **Feeds:** your personalized home feed and its chips; Up Next is YouTube's real recommendations.
@@ -79,8 +97,8 @@ path `/healthz`.
   Upload date or View count.
 - **Video:** always up to **720p at 30 fps** (24/25 fps sources stay at their native rate to avoid judder).
   It starts fast, seeks without a black flash, buffers ahead smoothly, and resumes where you left off.
-- **Audio:** loudness-normalized to −12 LUFS, so videos play about as loud as other apps and the level is
-  consistent from video to video.
+- **Audio:** loudness-normalized to −12 LUFS on the server, so the level is consistent from video to
+  video. The player then adds +6 dB with a limiter, so 100% volume sits with other apps.
 - **Touch:**
   - **Taps:** tap shows or hides the controls; double-tap the sides to skip ±10 s (taps add up).
   - **Swipe:** swipe down to leave fullscreen.
@@ -96,6 +114,9 @@ stream as the video. JSMpeg decodes it in WebAssembly and plays it through the *
 clock is the master clock: each video frame is shown when the audio reaches its timestamp, which keeps
 lip-sync tight. Browsers block audio until you interact with the page; if that happens, a **Tap to unmute**
 button appears.
+
+The player boosts the output ×2 (+6 dB) and runs it through a fast limiter, so 100% volume matches other
+apps without loud moments clipping.
 
 Audio is scheduled sample-exactly with about 1 s queued (3 s in the background), so a busy page (scrolling, images loading)
 doesn't run it dry. Pauses and buffering fade the sound out and back in over a few milliseconds, so they
@@ -118,6 +139,8 @@ never pop.
   - **Silent audio element:** browsers only show these controls while a media element plays, so a silent,
     looping `<audio>` element runs alongside the video. It makes no sound; the real audio still goes through
     Web Audio.
+  - **Car browsers:** some in-car media bars show only a stop button for browser audio, because they treat
+    it as a stream. Windows, Android and iPadOS show the full controls.
 
 ## Fast starts and seeking
 
@@ -125,6 +148,13 @@ never pop.
   YouTube's storyboard (the sprite sheets YouTube's own player uses). They come with the stream lookup,
   so they cost the server nothing extra; the images load straight from `i.ytimg.com`.
 
+- **Fast link lookup:** stream links are first looked up with a single yt-dlp client that needs no
+  JavaScript challenge solving, anonymously: about 1 s instead of about 3 s. Your account still drives
+  feeds, history and likes. Videos that need the account (age-restricted, members-only, bot checks) fall
+  back to the full signed-in lookup. Videos uploaded at 60 fps may then download a 720p60 source; the
+  stream to your browser is the same 30 fps either way.
+- **Refused links:** if YouTube refuses links from one of yt-dlp's clients, that client is avoided for
+  6 hours and the video is retried with links from another, automatically.
 - **yt-dlp stays loaded:** one long-running worker keeps it in memory with its caches warm, instead of
   starting it per video. That roughly halves the time to resolve a video; a repeat resolve takes about 16 ms.
 - **Source cache:** ffmpeg reads YouTube's video and audio through a local proxy. The proxy downloads them
@@ -135,14 +165,17 @@ never pop.
   - **Desktop:** hovering a video resolves it and downloads its first ~1 MB of video and audio.
   - **Tablets:** cards that stay on screen for a second get the same treatment, up to 4 per page.
   - **Watch page:** while you watch, the next video in Up Next or the playlist is prepared too.
+  - **One at a time:** prefetches use one of yt-dlp's three slots, so the video you click never waits
+    behind them.
   - **Result:** a prefetched video starts in about 1 s.
 
 ## Buffering
 
 The server transcodes ahead of playback until about 30 s are buffered, then pauses ffmpeg (no CPU used)
-until the buffer drops. Playback starts once about 1 s is buffered. If the buffer ever runs dry, because of
-a slow server or connection, the player pauses with a spinner until 3 s are buffered and then plays
-smoothly, instead of stuttering.
+until the buffer drops. Playback starts as soon as the first frame is on screen and 0.3 s of audio has
+arrived; the buffer then builds while you watch, because the server encodes faster than real time. If the
+buffer ever runs dry, because of a slow server or connection, the player pauses with a spinner until it has
+caught up (1 s in the first 15 s of a video, 3 s after that) and then plays smoothly, instead of stuttering.
 
 ## Signing in
 
@@ -219,11 +252,15 @@ public/
   js/player.js              canvas player: custom JSMpeg source, timed playback, gestures
   js/account.js             sign-in sheet, native sign-in form, browser view
   vendor/jsmpeg.min.js      JSMpeg (MIT, phoboslab/jsmpeg)
+docs/screenshots/           README screenshots
 ```
 
 ## Limitations
 
 - **CPU:** MPEG-1 is inefficient. Each viewer costs one ffmpeg transcode at about 3.5 Mbit/s.
-- **Not available:** picture-in-picture and background audio (both need `<video>`), Shorts, live chat
-  and replying to comments.
+- **Not available:** picture-in-picture (needs `<video>`), live chat and replying to comments. Shorts are
+  left out on purpose.
+- **Bandwidth:** the server downloads the whole source video in the background once you start it (for
+  instant seeks), and keeps going for up to 10 minutes after you stop watching. The stream to the browser
+  is at most 3.5 Mbit/s.
 - **Keeping it working:** YouTube changes often. Pull the latest image to update yt-dlp and youtubei.js.
